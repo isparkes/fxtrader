@@ -1,0 +1,10 @@
+.venv
+.venv2
+__pycache__
+*.pyc
+.git
+backtest.py
+backtest_trades.csv
+gbpusd_backtest_trades.csv
+README.md
+USER_MANUAL.md

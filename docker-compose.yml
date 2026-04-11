@@ -1,0 +1,10 @@
+services:
+  fxtrader:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - ./signals.jsonl:/app/signals.jsonl
+    # Override CMD to pass flags, e.g.:
+    #   command: ["--dry-run"]
+    #   command: ["--pair", "eurusd", "--interval", "60"]

@@ -50,6 +50,67 @@ python backtest.py --pair gbpusd --long
 
 ---
 
+## Docker
+
+### Prerequisites
+
+Create a `.env` file with your email credentials before building (see `mailer.py` for the required variables). The file is copied into the image at build time and is also passed via `env_file` in Compose so runtime overrides work too.
+
+### Build
+
+```bash
+docker build -t fxtrader .
+```
+
+### Run with Docker Compose (recommended)
+
+`docker-compose.yml` mounts `signals.jsonl` from the host so the signal log survives container restarts.
+
+```bash
+docker compose up -d
+```
+
+By default the daemon monitors all pairs on a 5-minute poll interval. To override, set `command` in `docker-compose.yml` or pass flags directly:
+
+```yaml
+# docker-compose.yml — examples
+command: ["--dry-run"]
+command: ["--pair", "eurusd", "--interval", "60"]
+```
+
+### Run without Compose
+
+```bash
+# All pairs, default interval, with persistent signal log
+docker run -d \
+  --env-file .env \
+  -v "$(pwd)/signals.jsonl:/app/signals.jsonl" \
+  --restart unless-stopped \
+  fxtrader
+
+# Single pair, 60-second interval, dry-run (no emails)
+docker run -d \
+  --env-file .env \
+  -v "$(pwd)/signals.jsonl:/app/signals.jsonl" \
+  fxtrader --pair eurusd --interval 60 --dry-run
+```
+
+### Daemon flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--pair <name>` | all pairs | Monitor a single pair (e.g. `eurusd`) |
+| `--interval <seconds>` | `300` | Poll interval in seconds |
+| `--dry-run` | off | Log events but do not send emails |
+
+### Viewing logs
+
+```bash
+docker compose logs -f
+```
+
+---
+
 ## Strategy
 
 ### Trend filter (1h bars — all three gates must pass)
