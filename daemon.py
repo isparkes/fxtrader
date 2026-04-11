@@ -40,7 +40,7 @@ import signal
 import time
 import logging
 import argparse
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from dataclasses import dataclass
 from typing import Optional
 
@@ -292,6 +292,67 @@ def _email_close(pos: Position, event: str, exit_price: float) -> tuple[str, str
     return subject, body
 
 
+# ── Startup / summary emails ──────────────────────────────────────────────────
+
+def _email_startup(pairs: list[tuple[str, str]]) -> tuple[str, str]:
+    subject = "[FX Trader] Daemon started"
+    body = "\n".join([
+        "FX Trader daemon has started successfully.",
+        "",
+        f"Monitoring {len(pairs)} pair(s): {', '.join(p.upper() for p, _ in pairs)}",
+        f"Started at : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        "",
+        "You will receive alerts for OPEN, BE, and CLOSE events.",
+    ])
+    return subject, body
+
+
+def _email_daily_summary(
+    pairs: list[tuple[str, str]],
+    states: dict[str, "PairState"],
+) -> tuple[str, str]:
+    now = datetime.now(timezone.utc)
+    subject = f"[FX Trader] Daily Summary — {now.strftime('%Y-%m-%d')}"
+
+    lines = [
+        f"Daily Status Summary — {now.strftime('%Y-%m-%d %H:%M UTC')}",
+        "",
+        f"Monitoring : {', '.join(p.upper() for p, _ in pairs)}",
+        "",
+    ]
+
+    open_positions = [
+        states[sym].position for _, sym in pairs if states[sym].position is not None
+    ]
+
+    if open_positions:
+        lines.append(f"Open Positions ({len(open_positions)}):")
+        for pos in open_positions:
+            lines.extend([
+                "",
+                f"  {pos.pair.upper()} {pos.direction}",
+                f"    Opened      : {pos.opened_at}",
+                f"    Entry       : {pos.entry_price:.5f}",
+                f"    Stop Loss   : {pos.stop_loss:.5f}",
+                f"    Take Profit : {pos.take_profit:.5f}",
+                f"    R:R         : 1 : {pos.rr_ratio:.2f}",
+                f"    Breakeven   : {'activated' if pos.be_activated else 'pending'}",
+            ])
+    else:
+        lines.append("Open Positions : None")
+
+    # Pairs in cooldown
+    in_cooldown = [
+        f"{pair.upper()} (until {states[sym].cooldown_until.strftime('%H:%M UTC')})"
+        for pair, sym in pairs
+        if states[sym].cooldown_until and datetime.now(timezone.utc) < states[sym].cooldown_until
+    ]
+    if in_cooldown:
+        lines.extend(["", "In Cooldown : " + ", ".join(in_cooldown)])
+
+    return subject, "\n".join(lines)
+
+
 # ── Core tick ─────────────────────────────────────────────────────────────────
 
 def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
@@ -441,12 +502,33 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool) -> N
         "  [DRY-RUN]" if dry_run else "",
     )
 
+    # Send a test email on startup to confirm SMTP is working
+    subj, body = _email_startup(pairs)
+    if dry_run:
+        log.info("[DRY-RUN] %s", subj)
+    else:
+        send_email(subj, body)
+
+    daily_summary_sent: Optional[date] = None
+
     while True:
         for pair, symbol in pairs:
             try:
                 states[symbol] = tick(pair, symbol, states[symbol], dry_run)
             except Exception as exc:
                 log.exception("%s  unexpected error in tick: %s", pair.upper(), exc)
+
+        # Daily summary — fires on the first poll at or after 12:00 UTC each day
+        now = datetime.now(timezone.utc)
+        today = now.date()
+        if now.hour >= 12 and daily_summary_sent != today:
+            daily_summary_sent = today
+            log.info("Sending daily summary email")
+            subj, body = _email_daily_summary(pairs, states)
+            if dry_run:
+                log.info("[DRY-RUN] %s", subj)
+            else:
+                send_email(subj, body)
 
         time.sleep(interval)
 
