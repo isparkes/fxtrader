@@ -62,6 +62,12 @@ Create a `.env` file with your email credentials before building (see `mailer.py
 docker build -t fxtrader .
 ```
 
+### Build for Intel on Mac
+
+```bash
+docker build --platform linux/amd64 -t iansparkes/fxtrader:1.0.0 .
+```
+
 ### Run with Docker Compose (recommended)
 
 `docker-compose.yml` mounts `signals.jsonl` from the host so the signal log survives container restarts.
