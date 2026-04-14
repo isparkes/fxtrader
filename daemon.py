@@ -108,6 +108,7 @@ class PairState:
     position:        Optional[Position]     = None
     cooldown_until:  Optional[datetime]     = None
     last_signal_bar: Optional[str]          = None  # prevents duplicate entry on same bar
+    month_pips:      float                  = 0.0   # cumulative closed-trade pips this calendar month
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
@@ -310,14 +311,17 @@ def _email_startup(pairs: list[tuple[str, str]]) -> tuple[str, str]:
 def _email_daily_summary(
     pairs: list[tuple[str, str]],
     states: dict[str, "PairState"],
+    month_pips: float,
 ) -> tuple[str, str]:
     now = datetime.now(timezone.utc)
     subject = f"[FX Trader] Daily Summary — {now.strftime('%Y-%m-%d')}"
 
+    sign = "+" if month_pips >= 0 else ""
     lines = [
         f"Daily Status Summary — {now.strftime('%Y-%m-%d %H:%M UTC')}",
         "",
         f"Monitoring : {', '.join(p.upper() for p, _ in pairs)}",
+        f"Month-to-date pips : {sign}{month_pips:.1f}  (resets each calendar month)",
         "",
     ]
 
@@ -412,6 +416,8 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
                     log.info("[DRY-RUN] %s", subj)
                 else:
                     send_email(subj, body)
+
+                state.month_pips += pnl
 
                 if event == "close_sl":
                     state.cooldown_until = now + timedelta(minutes=COOLDOWN_MINS)
@@ -509,7 +515,10 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool) -> N
     else:
         send_email(subj, body)
 
-    daily_summary_sent: Optional[date] = None
+    # Track twice-daily summary sends as (date, slot) where slot is "AM" or "PM".
+    # AM fires on the first poll at or after 08:00 UTC; PM at or after 20:00 UTC.
+    last_summary_slot: Optional[tuple] = None
+    current_month: int = datetime.now(timezone.utc).month
 
     while True:
         for pair, symbol in pairs:
@@ -518,13 +527,29 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool) -> N
             except Exception as exc:
                 log.exception("%s  unexpected error in tick: %s", pair.upper(), exc)
 
-        # Daily summary — fires on the first poll at or after 12:00 UTC each day
         now = datetime.now(timezone.utc)
         today = now.date()
-        if now.hour >= 12 and daily_summary_sent != today:
-            daily_summary_sent = today
-            log.info("Sending daily summary email")
-            subj, body = _email_daily_summary(pairs, states)
+
+        # Reset monthly pip totals on calendar month rollover
+        if now.month != current_month:
+            current_month = now.month
+            for state in states.values():
+                state.month_pips = 0.0
+            log.info("New calendar month — monthly pip totals reset")
+
+        # Twice-daily summary — AM slot (≥ 08:00 UTC) and PM slot (≥ 20:00 UTC)
+        if now.hour >= 20:
+            slot = (today, "PM")
+        elif now.hour >= 8:
+            slot = (today, "AM")
+        else:
+            slot = None
+
+        if slot and last_summary_slot != slot:
+            last_summary_slot = slot
+            total_month_pips = sum(s.month_pips for s in states.values())
+            log.info("Sending %s summary email", slot[1])
+            subj, body = _email_daily_summary(pairs, states, total_month_pips)
             if dry_run:
                 log.info("[DRY-RUN] %s", subj)
             else:
