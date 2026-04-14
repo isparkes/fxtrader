@@ -62,11 +62,20 @@ Create a `.env` file with your email credentials before building (see `mailer.py
 docker build -t fxtrader .
 ```
 
-### Build for Intel on Mac
+### Build for Intel on Mac (cross-compile to `linux/amd64`)
+
+If you are running Apple Silicon (M-series) and need to deploy to an Intel/AMD64
+Linux host, pass `--platform linux/amd64` so Docker emulates the target
+architecture via QEMU:
 
 ```bash
 docker build --platform linux/amd64 -t iansparkes/fxtrader:1.0.0 .
 ```
+
+> **Note:** all dependencies (including numpy) are installed from pre-built
+> binary wheels. Do **not** add `--no-binary numpy` or any other
+> `--no-binary` flag — cross-compilation has no C compiler available and the
+> source build will fail.
 
 ### Run with Docker Compose (recommended)
 
