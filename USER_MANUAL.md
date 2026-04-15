@@ -78,7 +78,8 @@ Each signal panel shows:
 | MACD Hist    | 1h MACD histogram — momentum direction             |
 | Basis        | Which pattern fired and on which 5m bar            |
 
-All signals are appended to `signals.jsonl` in the current directory.
+All signals are appended to `signals.jsonl` in the current directory.  The
+daemon additionally writes every OPEN / BE / CLOSE event to `trades.jsonl`.
 
 ### Signal logic summary
 
@@ -141,6 +142,16 @@ No email is sent for FLAT bars or while a position is already open.
    ```
    MAIL_TO=trader@example.com,alerts@example.com
    ```
+
+### Trade log and restart persistence
+
+The daemon writes every OPEN, BE, and CLOSE event as a JSON line to
+`trades.jsonl` in the working directory.  On startup it replays this file to
+restore any open positions and the month-to-date pip total, so you can stop
+and restart the daemon without losing trade state.
+
+Mount `trades.jsonl` as a Docker volume (or keep it alongside the process) to
+ensure persistence across container restarts.
 
 ### Starting the daemon
 

@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./signals.jsonl:/app/signals.jsonl
+      - ./trades.jsonl:/app/trades.jsonl
     # Override CMD to pass flags, e.g.:
     #   command: ["--dry-run"]
     #   command: ["--pair", "eurusd", "--interval", "60"]

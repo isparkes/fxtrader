@@ -5,8 +5,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY daemon.py indicator.py mailer.py ./
+COPY daemon.py indicator.py mailer.py tradelog.py ./
 
-# signals.jsonl is written at runtime — mount a volume if you want persistence
+# trades.jsonl (daemon state) and signals.jsonl are written at runtime —
+# mount volumes if you want persistence across container restarts
 ENTRYPOINT ["python", "daemon.py"]
 CMD []

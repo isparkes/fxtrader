@@ -10,8 +10,12 @@ historical data via the walk-forward backtest.
 | File | Purpose |
 |---|---|
 | `indicator.py` | Live signal generator — fetches current market data and prints the trading signal |
+| `daemon.py` | Long-running daemon — polls pairs, manages positions, sends email alerts |
+| `mailer.py` | SMTP email helper used by the daemon |
+| `tradelog.py` | Append-only trade journal (`trades.jsonl`) — persists positions across daemon restarts |
 | `backtest.py` | Walk-forward backtest — replays the strategy against historical OHLCV data |
 | `signals.jsonl` | Append-only log of every live signal that has been generated |
+| `trades.jsonl` | Daemon trade log — one JSON line per OPEN / BE / CLOSE event |
 | `{pair}_backtest_trades.csv` | Trade-by-trade backtest output (one file per pair) |
 
 ## Supported pairs
@@ -79,7 +83,7 @@ docker build --platform linux/amd64 -t iansparkes/fxtrader:1.0.0 .
 
 ### Run with Docker Compose (recommended)
 
-`docker-compose.yml` mounts `signals.jsonl` from the host so the signal log survives container restarts.
+`docker-compose.yml` mounts `signals.jsonl` and `trades.jsonl` from the host so both the signal log and daemon trade state survive container restarts.
 
 ```bash
 docker compose up -d
@@ -96,10 +100,11 @@ command: ["--pair", "eurusd", "--interval", "60"]
 ### Run without Compose
 
 ```bash
-# All pairs, default interval, with persistent signal log
+# All pairs, default interval, with persistent signal log and trade state
 docker run -d \
   --env-file .env \
   -v "$(pwd)/signals.jsonl:/app/signals.jsonl" \
+  -v "$(pwd)/trades.jsonl:/app/trades.jsonl" \
   --restart unless-stopped \
   fxtrader
 
@@ -107,6 +112,7 @@ docker run -d \
 docker run -d \
   --env-file .env \
   -v "$(pwd)/signals.jsonl:/app/signals.jsonl" \
+  -v "$(pwd)/trades.jsonl:/app/trades.jsonl" \
   fxtrader --pair eurusd --interval 60 --dry-run
 ```
 

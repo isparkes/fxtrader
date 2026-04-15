@@ -55,6 +55,7 @@ from indicator import (
     assess_h1_bias, find_m5_entry, build_signal,
 )
 from mailer import send_email
+import tradelog
 
 load_dotenv()
 
@@ -295,17 +296,34 @@ def _email_close(pos: Position, event: str, exit_price: float) -> tuple[str, str
 
 # ── Startup / summary emails ──────────────────────────────────────────────────
 
-def _email_startup(pairs: list[tuple[str, str]]) -> tuple[str, str]:
+def _email_startup(
+    pairs: list[tuple[str, str]],
+    restored: list["Position"],
+) -> tuple[str, str]:
     subject = "[FX Trader] Daemon started"
-    body = "\n".join([
+    lines = [
         "FX Trader daemon has started successfully.",
         "",
         f"Monitoring {len(pairs)} pair(s): {', '.join(p.upper() for p, _ in pairs)}",
         f"Started at : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
         "",
         "You will receive alerts for OPEN, BE, and CLOSE events.",
-    ])
-    return subject, body
+    ]
+    if restored:
+        lines += ["", f"Restored {len(restored)} open position(s) from trade log:"]
+        for pos in restored:
+            lines += [
+                "",
+                f"  {pos.pair.upper()} {pos.direction}",
+                f"    Opened      : {pos.opened_at}",
+                f"    Entry       : {pos.entry_price:.5f}",
+                f"    Stop Loss   : {pos.stop_loss:.5f}",
+                f"    Take Profit : {pos.take_profit:.5f}",
+                f"    Breakeven   : {'activated' if pos.be_activated else 'pending'}",
+            ]
+    else:
+        lines += ["", "No open positions restored from trade log."]
+    return subject, "\n".join(lines)
 
 
 def _email_daily_summary(
@@ -396,6 +414,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
         for event, price in events:
             if event == "be":
                 log.info("%s  BE triggered — SL moved to %.5f", pair.upper(), pos.entry_price)
+                tradelog.log_be(pos)
                 subj, body = _email_be(pos)
                 if dry_run:
                     log.info("[DRY-RUN] %s", subj)
@@ -411,6 +430,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
                     "%s  CLOSE %s — %s @ %.5f  P&L %.1f pips",
                     pair.upper(), pos.direction, event, price, pnl,
                 )
+                tradelog.log_close(pos, event, price, pnl)
                 subj, body = _email_close(pos, event, price)
                 if dry_run:
                     log.info("[DRY-RUN] %s", subj)
@@ -484,6 +504,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
         pos.stop_loss, pos.take_profit,
         pos.risk_pips, pos.reward_pips, pos.rr_ratio,
     )
+    tradelog.log_open(pos)
 
     subj, body = _email_open(pos)
     if dry_run:
@@ -500,6 +521,31 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool) -> N
     """Poll all watched pairs in sequence, sleep, repeat."""
     states: dict[str, PairState] = {sym: PairState() for _, sym in pairs}
 
+    # ── Restore open positions from trade log ─────────────────────────────────
+    saved = tradelog.load_state()
+    restored_positions: list[Position] = []
+
+    for symbol, data in saved.items():
+        if symbol not in states:
+            log.warning("Trade log has symbol %s not in current pair list — skipped", symbol)
+            continue
+
+        states[symbol].month_pips = data["month_pips"]
+
+        pos_data = data.get("position")
+        if pos_data:
+            pos = Position(**pos_data)
+            states[symbol].position = pos
+            restored_positions.append(pos)
+
+    if restored_positions:
+        log.info(
+            "Restored %d open position(s) from %s",
+            len(restored_positions), tradelog.TRADE_LOG_FILE,
+        )
+    else:
+        log.info("No open positions in trade log")
+
     log.info(
         "Daemon started — %d pair(s): %s — poll interval %ds%s",
         len(pairs),
@@ -508,8 +554,8 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool) -> N
         "  [DRY-RUN]" if dry_run else "",
     )
 
-    # Send a test email on startup to confirm SMTP is working
-    subj, body = _email_startup(pairs)
+    # Send a startup email (includes any restored positions)
+    subj, body = _email_startup(pairs, restored_positions)
     if dry_run:
         log.info("[DRY-RUN] %s", subj)
     else:
