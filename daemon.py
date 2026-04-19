@@ -52,7 +52,7 @@ from indicator import (
     PAIRS,
     ATR_SL_MULT, ATR_TP_MULT,
     compute_h1_indicators, compute_m5_indicators,
-    assess_h1_bias, find_m5_entry, build_signal,
+    assess_h1_bias, find_m5_entry, build_signal, pip_value,
 )
 from mailer import send_email
 import tradelog
@@ -67,7 +67,6 @@ logging.basicConfig(
 log = logging.getLogger("fxtrader.daemon")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-PIP_VALUE           = 0.0001
 TRAIL_ACTIVATE_FRAC = 0.80   # mirrors backtest.py
 COOLDOWN_MINS       = 30     # post-loss lockout
 
@@ -206,12 +205,13 @@ def check_position_events(pos: Position, bar: pd.Series) -> list[tuple[str, floa
 
     # Phase 1 — breakeven trigger (80 % of the way to TP)
     if not pos.be_activated:
-        tp_dist_pips  = abs(pos.take_profit - pos.entry_price) / PIP_VALUE
+        pv            = pip_value(pos.pair)
+        tp_dist_pips  = abs(pos.take_profit - pos.entry_price) / pv
         activate_pips = tp_dist_pips * TRAIL_ACTIVATE_FRAC
         progress = (
             (high - pos.entry_price) if pos.direction == "BUY"
             else (pos.entry_price - low)
-        ) / PIP_VALUE
+        ) / pv
         if progress >= activate_pips:
             pos.stop_loss    = pos.entry_price
             pos.be_activated = True
@@ -274,7 +274,7 @@ def _email_close(pos: Position, event: str, exit_price: float) -> tuple[str, str
     pnl_pips = (
         (exit_price - pos.entry_price) if pos.direction == "BUY"
         else (pos.entry_price - exit_price)
-    ) / PIP_VALUE
+    ) / pip_value(pos.pair)
     result   = "WIN" if pnl_pips > 0 else "LOSS"
     reason   = "Take Profit" if event == "close_tp" else "Stop Loss"
     sign     = "+" if pnl_pips >= 0 else ""
@@ -425,7 +425,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
                 pnl = (
                     (price - pos.entry_price) if pos.direction == "BUY"
                     else (pos.entry_price - price)
-                ) / PIP_VALUE
+                ) / pip_value(pair)
                 log.info(
                     "%s  CLOSE %s — %s @ %.5f  P&L %.1f pips",
                     pair.upper(), pos.direction, event, price, pnl,
@@ -477,7 +477,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
         log.debug("%s  duplicate signal bar (%s) — skipped", pair.upper(), entry["bar_time"])
         return state
 
-    signal = build_signal(h1_bias, entry)
+    signal = build_signal(h1_bias, entry, symbol)
     if signal.direction == "FLAT":
         return state
 

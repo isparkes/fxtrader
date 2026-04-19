@@ -127,6 +127,12 @@ PAIRS: dict[str, str] = {
 # Default pair (kept for backward-compatibility when indicator.py is imported)
 SYMBOL = "EURUSD=X"
 
+
+def pip_value(symbol: str) -> float:
+    """Return the pip size for a symbol. JPY pairs use 0.01; all others 0.0001."""
+    return 0.01 if "JPY" in symbol.upper() else 0.0001
+
+
 # ── Tunable parameters ────────────────────────────────────────────────────────
 # 1h trend
 H1_EMA_TREND   = 50
@@ -394,7 +400,7 @@ def find_m5_entry(df5m: pd.DataFrame, direction: str) -> Optional[dict]:
     return None
 
 
-def build_signal(h1_bias: dict, entry: Optional[dict]) -> Signal:
+def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD=X") -> Signal:
     """
     Combine the 1h bias and the 5m entry trigger into a Signal dataclass.
 
@@ -431,8 +437,9 @@ def build_signal(h1_bias: dict, entry: Optional[dict]) -> Signal:
         sl = ep + atr * ATR_SL_MULT
         tp = ep - atr * ATR_TP_MULT
 
-    risk_pips   = abs(ep - sl) * 10000
-    reward_pips = abs(tp - ep) * 10000
+    pv          = pip_value(symbol)
+    risk_pips   = abs(ep - sl) / pv
+    reward_pips = abs(tp - ep) / pv
     rr          = reward_pips / risk_pips if risk_pips > 0 else 0
 
     pattern_labels = {
@@ -484,7 +491,7 @@ def run(symbol: str = SYMBOL) -> Signal:
 
     h1_bias = assess_h1_bias(df_h1)
     entry   = find_m5_entry(df_5m, h1_bias["direction"])
-    signal  = build_signal(h1_bias, entry)
+    signal  = build_signal(h1_bias, entry, symbol)
 
     return signal
 

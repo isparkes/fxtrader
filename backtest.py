@@ -67,7 +67,7 @@ from indicator import (
     ATR_SL_MULT, ATR_TP_MULT,
     H1_EMA_TREND, H1_MACD_FAST, H1_MACD_SLOW, H1_MACD_SIGNAL, H1_RSI_PERIOD,
     M5_EMA_FAST, M5_EMA_SLOW, M5_RSI_PERIOD, M5_STOCH_PERIOD, M5_STOCH_SMOOTH, M5_ATR_MIN,
-    compute_h1_indicators, compute_m5_indicators,
+    compute_h1_indicators, compute_m5_indicators, pip_value,
 )
 
 # ── Per-pair spread defaults ──────────────────────────────────────────────────
@@ -86,7 +86,6 @@ PAIR_CONFIG: dict[str, dict] = {
 
 console = Console()
 
-PIP_VALUE           = 0.0001
 SPREAD_PIPS         = 1.5    # typical scalper spread
 COOLDOWN_BARS       = 6      # 6 × 5m = 30 min pause after a loss before re-entering
 SESSION_START_UTC   = 7      # London open
@@ -310,7 +309,7 @@ def check_entry(bars: pd.DataFrame, i: int, direction: str) -> float | None:
 
 def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
                  bar_mins: int = 5, spread_pips: float = SPREAD_PIPS,
-                 use_session: bool = True) -> list[dict]:
+                 use_session: bool = True, symbol: str = "EURUSD=X") -> list[dict]:
     """
     Walk forward through the merged entry bars, simulating trades.
 
@@ -330,6 +329,7 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
     """
     merged = merge_trend(df_h1, df_5m)
     bars   = merged.reset_index()
+    pv     = pip_value(symbol)
 
     trades         = []
     in_trade       = False
@@ -357,7 +357,7 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
             #   No fixed TP ceiling — the trail exits when the move exhausts.
             if direction == "BUY":
                 if not be_activated:
-                    if (high - entry_p) / PIP_VALUE >= trail_activate_at:
+                    if (high - entry_p) / pv >= trail_activate_at:
                         trailing_sl  = entry_p
                         be_activated = True
                 else:
@@ -366,7 +366,7 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
                         trailing_sl = new_trail
             else:
                 if not be_activated:
-                    if (entry_p - low) / PIP_VALUE >= trail_activate_at:
+                    if (entry_p - low) / pv >= trail_activate_at:
                         trailing_sl  = entry_p
                         be_activated = True
                 else:
@@ -383,7 +383,7 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
 
             if hit_tp or hit_sl or force:
                 exit_p   = tp if hit_tp else (trailing_sl if hit_sl else float(row["close"]))
-                pnl_pips = ((exit_p - entry_p) / PIP_VALUE) * (1 if direction == "BUY" else -1)
+                pnl_pips = ((exit_p - entry_p) / pv) * (1 if direction == "BUY" else -1)
                 pnl_pips -= spread_pips
 
                 result = "WIN" if pnl_pips > 0 else "LOSS"
@@ -421,7 +421,7 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
 
         h1_atr = row.get("h1_atr")
         atr    = float(h1_atr) if not pd.isna(h1_atr) else 0.001
-        spread = SPREAD_PIPS * PIP_VALUE
+        spread = SPREAD_PIPS * pv
 
         if bias == "BUY":
             entry_p    = ep + spread
@@ -439,7 +439,7 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
         trailing_sl       = sl                  # starts as the hard stop
         trail_distance    = atr * ATR_SL_MULT   # distance to trail behind best price
         # Pip distance needed before triggering breakeven (80 % of initial TP distance)
-        tp_distance_pips  = abs(tp - entry_p) / PIP_VALUE
+        tp_distance_pips  = abs(tp - entry_p) / pv
         trail_activate_at = tp_distance_pips * TRAIL_ACTIVATE_FRAC
 
     return trades
@@ -606,12 +606,12 @@ if __name__ == "__main__":
             if args.long:
                 df_trend, df_entry = fetch_data_long(symbol)
                 trades = run_backtest(df_trend, df_entry, bar_mins=60,
-                                      spread_pips=cfg["spread_long"], use_session=False)
+                                      spread_pips=cfg["spread_long"], use_session=False, symbol=symbol)
                 report(trades, bar_mins=60, pair_label=pair_label)
             else:
                 df_trend, df_entry = fetch_data(symbol)
                 trades = run_backtest(df_trend, df_entry, bar_mins=5,
-                                      spread_pips=cfg["spread_scalp"], use_session=True)
+                                      spread_pips=cfg["spread_scalp"], use_session=True, symbol=symbol)
                 report(trades, bar_mins=5, pair_label=pair_label)
             all_results.append((pair_label, trades))
         report_all(all_results, bar_mins=bar_mins)
@@ -624,11 +624,11 @@ if __name__ == "__main__":
             console.print(f"[bold cyan]Running {pair_label} Scalper backtest (long mode · 730d · 1h bars)...[/]")
             df_trend, df_entry = fetch_data_long(symbol)
             trades = run_backtest(df_trend, df_entry, bar_mins=60,
-                                  spread_pips=cfg["spread_long"], use_session=False)
+                                  spread_pips=cfg["spread_long"], use_session=False, symbol=symbol)
             report(trades, bar_mins=60, pair_label=pair_label)
         else:
             console.print(f"[bold cyan]Running {pair_label} Scalper backtest (scalp mode · 60d · 5m bars)...[/]")
             df_trend, df_entry = fetch_data(symbol)
             trades = run_backtest(df_trend, df_entry, bar_mins=5,
-                                  spread_pips=cfg["spread_scalp"], use_session=True)
+                                  spread_pips=cfg["spread_scalp"], use_session=True, symbol=symbol)
             report(trades, bar_mins=5, pair_label=pair_label)
