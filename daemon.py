@@ -52,7 +52,6 @@ import indicator_eurusd
 import indicator_gbpusd
 import indicator_usdjpy
 import indicator_audusd
-from indicator_eurusd import pip_value
 
 # The 4 actively traded pairs and their indicator modules.
 PAIRS: dict[str, str] = {
@@ -219,7 +218,7 @@ def check_position_events(pos: Position, bar: pd.Series) -> list[tuple[str, floa
 
     # Phase 1 — breakeven trigger (80 % of the way to TP)
     if not pos.be_activated:
-        pv            = pip_value(pos.pair)
+        pv            = PAIR_INDICATORS[pos.pair].pip_value(pos.pair)
         tp_dist_pips  = abs(pos.take_profit - pos.entry_price) / pv
         activate_pips = tp_dist_pips * TRAIL_ACTIVATE_FRAC
         progress = (
@@ -288,7 +287,7 @@ def _email_close(pos: Position, event: str, exit_price: float) -> tuple[str, str
     pnl_pips = (
         (exit_price - pos.entry_price) if pos.direction == "BUY"
         else (pos.entry_price - exit_price)
-    ) / pip_value(pos.pair)
+    ) / PAIR_INDICATORS[pos.pair].pip_value(pos.pair)
     result   = "WIN" if pnl_pips > 0 else "LOSS"
     reason   = "Take Profit" if event == "close_tp" else "Stop Loss"
     sign     = "+" if pnl_pips >= 0 else ""
@@ -440,7 +439,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
                 pnl = (
                     (price - pos.entry_price) if pos.direction == "BUY"
                     else (pos.entry_price - price)
-                ) / pip_value(pair)
+                ) / PAIR_INDICATORS[pair].pip_value(pair)
                 log.info(
                     "%s  CLOSE %s — %s @ %.5f  P&L %.1f pips",
                     pair.upper(), pos.direction, event, price, pnl,

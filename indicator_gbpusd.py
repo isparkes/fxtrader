@@ -146,6 +146,12 @@ ATR_PERIOD        = 14
 ATR_SL_MULT       = 0.4   # ~4-8 pip stop
 ATR_TP_MULT       = 3.0   # wide ceiling — trailing stop usually exits first
 
+# Pattern D — HA pullback stop parameters
+HA_SL_BUFFER_PIPS = 2
+HA_SL_MIN_PIPS    = 7
+HA_SL_MAX_PIPS    = 12
+HA_MIN_RR         = 1.5
+
 # Session — London open through NY afternoon (UTC)
 SESSION_START_UTC = 7
 SESSION_END_UTC   = 16
@@ -269,6 +275,23 @@ def compute_m5_indicators(df: pd.DataFrame) -> pd.DataFrame:
         high=df["high"], low=df["low"], close=close, window=ATR_PERIOD,
     ).average_true_range()
 
+    # Heikin-Ashi for Pattern D
+    _o = df["open"].values
+    _h = df["high"].values
+    _l = df["low"].values
+    _c = df["close"].values
+
+    _hc    = (_o + _h + _l + _c) / 4.0
+    _ho    = _hc.copy()
+    _ho[0] = (_o[0] + _c[0]) / 2.0
+    for k in range(1, len(_ho)):
+        _ho[k] = (_ho[k - 1] + _hc[k - 1]) / 2.0
+
+    df["ha_close"] = _hc
+    df["ha_open"]  = _ho
+    df["ha_high"]  = df[["high", "ha_open", "ha_close"]].max(axis=1)
+    df["ha_low"]   = df[["low",  "ha_open", "ha_close"]].min(axis=1)
+
     return df
 
 
@@ -277,7 +300,7 @@ def assess_h1_bias(df: pd.DataFrame) -> dict:
     Evaluate the three trend gates on the last completed 1h bar and return
     the directional bias together with the raw indicator values.
 
-    Uses iloc[-2] (last completed bar) rather than iloc[-1] (still forming).
+    Uses iloc[-1] (the current forming bar) so the bias reflects live price action.
     Returns direction "FLAT" unless all three gates pass simultaneously:
         1. Price side of EMA50
         2. MACD histogram positive/negative AND building vs previous bar
@@ -291,22 +314,18 @@ def assess_h1_bias(df: pd.DataFrame) -> dict:
         trend      — human-readable EMA50 position string
         close      — last completed bar close price
     """
-    last = df.iloc[-2]   # -1 is still forming
-    prev = df.iloc[-3]
+    last = df.iloc[-1]
 
     close     = float(last["close"])
     ema_trend = float(last["ema_trend"])
     macd_hist = float(last["macd_hist"])
     atr       = float(last["atr"])
-
-    prev_hist = float(prev["macd_hist"])
     h1_rsi    = float(last["rsi"])
 
     above = close > ema_trend
     below = close < ema_trend
-    # MACD building + RSI on the right side of 50
-    bull  = macd_hist > 0 and macd_hist > prev_hist and h1_rsi > 50
-    bear  = macd_hist < 0 and macd_hist < prev_hist and h1_rsi < 50
+    bull  = macd_hist > 0 and h1_rsi > 50
+    bear  = macd_hist < 0 and h1_rsi < 50
 
     if above and bull:
         direction = "BUY"
@@ -325,7 +344,8 @@ def assess_h1_bias(df: pd.DataFrame) -> dict:
     }
 
 
-def find_m5_entry(df5m: pd.DataFrame, direction: str) -> Optional[dict]:
+def find_m5_entry(df5m: pd.DataFrame, direction: str,
+                   use_session: bool = True) -> Optional[dict]:
     """
     Scan the last 24 5m bars (2 hours) for a scalp entry trigger.
     Direction is set by 1h bias — entries only fire when aligned with it.
@@ -333,22 +353,26 @@ def find_m5_entry(df5m: pd.DataFrame, direction: str) -> Optional[dict]:
     Pattern A: EMA8 crosses EMA21 in trend direction, RSI showing momentum
     Pattern C: 5m MACD histogram flips in trend direction, RSI confirming
     (Pattern B — EMA21 wick bounce — removed: too noisy for scalping)
+
+    Returns the most recent (latest) matching bar, not the first.
     """
     if direction == "FLAT":
         return None
 
-    window = df5m.iloc[-24:].copy()
+    window = df5m.iloc[-30:].copy()   # extended for Pattern D's 5-bar lookback
+    last_entry = None
 
-    for i in range(3, len(window)):
+    for i in range(4, len(window)):
         bar  = window.iloc[i]
         prev = window.iloc[i - 1]
 
         # Session filter — skip bars outside London/NY overlap
-        ts = bar.name
-        if hasattr(ts, "hour"):
-            hour = ts.tz_convert("UTC").hour if getattr(ts, "tzinfo", None) else ts.hour
-            if not (SESSION_START_UTC <= hour < SESSION_END_UTC):
-                continue
+        if use_session:
+            ts = bar.name
+            if hasattr(ts, "hour"):
+                hour = ts.tz_convert("UTC").hour if getattr(ts, "tzinfo", None) else ts.hour
+                if not (SESSION_START_UTC <= hour < SESSION_END_UTC):
+                    continue
 
         close    = float(bar["close"])
         ema_fast = float(bar["ema_fast"])
@@ -374,22 +398,104 @@ def find_m5_entry(df5m: pd.DataFrame, direction: str) -> Optional[dict]:
             stoch_ok = stoch_k > stoch_d and stoch_k < 80
             # A: EMA8 crosses above EMA21, RSI and Stochastic confirm
             if ema_fast > ema_slow and prev_ef <= prev_es and 52 < rsi < 75 and stoch_ok:
-                return {"price": close, "bar_time": str(bar.name), "pattern": "A-ema-cross"}
+                last_entry = {"price": close, "bar_time": str(bar.name), "pattern": "A-ema-cross", "atr_m5": atr_m5}
+                continue
             # C: MACD histogram flips positive, RSI and Stochastic confirm
             if hist > 0 and prev_h <= 0 and close > ema_slow and 52 < rsi < 72 and stoch_ok:
-                return {"price": close, "bar_time": str(bar.name), "pattern": "C-macd-flip"}
+                last_entry = {"price": close, "bar_time": str(bar.name), "pattern": "C-macd-flip", "atr_m5": atr_m5}
 
         elif direction == "SELL":
             # Stochastic: %K below %D and not oversold
             stoch_ok = stoch_k < stoch_d and stoch_k > 20
             # A: EMA8 crosses below EMA21, RSI and Stochastic confirm
             if ema_fast < ema_slow and prev_ef >= prev_es and 25 < rsi < 48 and stoch_ok:
-                return {"price": close, "bar_time": str(bar.name), "pattern": "A-ema-cross"}
+                last_entry = {"price": close, "bar_time": str(bar.name), "pattern": "A-ema-cross", "atr_m5": atr_m5}
+                continue
             # C: MACD histogram flips negative, RSI and Stochastic confirm
             if hist < 0 and prev_h >= 0 and close < ema_slow and 28 < rsi < 48 and stoch_ok:
-                return {"price": close, "bar_time": str(bar.name), "pattern": "C-macd-flip"}
+                last_entry = {"price": close, "bar_time": str(bar.name), "pattern": "C-macd-flip", "atr_m5": atr_m5}
+                continue
 
-    return None
+        # Pattern D — HA pullback: 3 trend candles → 1 pullback → resumption
+        t1 = window.iloc[i - 4]
+        t2 = window.iloc[i - 3]
+        t3 = window.iloc[i - 2]
+        pb = prev
+
+        ha_cols = ("ha_close", "ha_open", "ha_high", "ha_low")
+        if any(pd.isna(bar.get(c)) for c in ha_cols):
+            continue
+        if any(pd.isna(pb.get(c)) or pd.isna(t1.get(c)) or
+               pd.isna(t2.get(c)) or pd.isna(t3.get(c)) for c in ha_cols):
+            continue
+
+        ha_c  = float(bar["ha_close"]); ha_o  = float(bar["ha_open"])
+        pb_hc = float(pb["ha_close"]);  pb_ho = float(pb["ha_open"])
+        t1_hc = float(t1["ha_close"]);  t1_ho = float(t1["ha_open"])
+        t2_hc = float(t2["ha_close"]);  t2_ho = float(t2["ha_open"])
+        t3_hc = float(t3["ha_close"]);  t3_ho = float(t3["ha_open"])
+
+        if direction == "BUY":
+            trend_ok  = t1_hc > t1_ho and t2_hc > t2_ho and t3_hc > t3_ho
+            pb_ok     = pb_hc < pb_ho
+            resume_ok = ha_c > ha_o
+            if trend_ok and pb_ok and resume_ok:
+                last_entry = {
+                    "price":            float(bar["open"]),
+                    "bar_time":         str(bar.name),
+                    "pattern":          "D-ha-pullback",
+                    "pullback_extreme": float(pb["ha_low"]),
+                    "atr_m5":           atr_m5,
+                }
+
+        elif direction == "SELL":
+            trend_ok  = t1_hc < t1_ho and t2_hc < t2_ho and t3_hc < t3_ho
+            pb_ok     = pb_hc > pb_ho
+            resume_ok = ha_c < ha_o
+            if trend_ok and pb_ok and resume_ok:
+                last_entry = {
+                    "price":            float(bar["open"]),
+                    "bar_time":         str(bar.name),
+                    "pattern":          "D-ha-pullback",
+                    "pullback_extreme": float(pb["ha_high"]),
+                    "atr_m5":           atr_m5,
+                }
+
+    return last_entry
+
+
+def compute_sl_tp(
+    entry_result: dict, bias: str, atr: float, spread: float, pv: float
+) -> Optional[tuple[float, float, float]]:
+    """Return (entry_p, sl, tp) or None if R:R is too low to trade."""
+    ep      = entry_result["price"]
+    pattern = entry_result.get("pattern", "")
+
+    if pattern == "D-ha-pullback":
+        extreme     = entry_result["pullback_extreme"]
+        entry_p     = ep + spread if bias == "BUY" else ep - spread
+        raw_sl_pips = abs(entry_p - extreme) / pv + HA_SL_BUFFER_PIPS
+        sl_pips     = max(HA_SL_MIN_PIPS, min(HA_SL_MAX_PIPS, raw_sl_pips))
+        sl_dist     = sl_pips * pv
+        if bias == "BUY":
+            sl = entry_p - sl_dist
+            tp = entry_p + atr * ATR_TP_MULT
+        else:
+            sl = entry_p + sl_dist
+            tp = entry_p - atr * ATR_TP_MULT
+        if abs(tp - entry_p) / pv / sl_pips < HA_MIN_RR:
+            return None
+        return entry_p, sl, tp
+
+    if bias == "BUY":
+        entry_p = ep + spread
+        sl      = entry_p - atr * ATR_SL_MULT
+        tp      = entry_p + atr * ATR_TP_MULT
+    else:
+        entry_p = ep - spread
+        sl      = entry_p + atr * ATR_SL_MULT
+        tp      = entry_p - atr * ATR_TP_MULT
+    return entry_p, sl, tp
 
 
 def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD=X") -> Signal:
@@ -421,29 +527,54 @@ def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD=X")
             risk_pips=None, reward_pips=None, rr_ratio=None,
         )
 
-    ep = entry["price"]
-    if direction == "BUY":
-        sl = ep - atr * ATR_SL_MULT
-        tp = ep + atr * ATR_TP_MULT
-    else:
-        sl = ep + atr * ATR_SL_MULT
-        tp = ep - atr * ATR_TP_MULT
+    ep      = entry["price"]
+    pattern = entry.get("pattern", "")
+    pv      = pip_value(symbol)
 
-    pv          = pip_value(symbol)
-    risk_pips   = abs(ep - sl) / pv
-    reward_pips = abs(tp - ep) / pv
-    rr          = reward_pips / risk_pips if risk_pips > 0 else 0
+    if pattern == "D-ha-pullback":
+        extreme     = entry["pullback_extreme"]
+        raw_sl_pips = abs(ep - extreme) / pv + HA_SL_BUFFER_PIPS
+        sl_pips     = max(HA_SL_MIN_PIPS, min(HA_SL_MAX_PIPS, raw_sl_pips))
+        sl_dist     = sl_pips * pv
+        if direction == "BUY":
+            sl = ep - sl_dist
+            tp = ep + atr * ATR_TP_MULT
+        else:
+            sl = ep + sl_dist
+            tp = ep - atr * ATR_TP_MULT
+        risk_pips   = sl_pips
+        reward_pips = abs(tp - ep) / pv
+        rr          = reward_pips / risk_pips if risk_pips > 0 else 0
+        if rr < HA_MIN_RR:
+            return Signal(
+                timestamp=now_str, direction="FLAT",
+                entry_price=None, stop_loss=None, take_profit=None,
+                atr=round(atr, 5),
+                h1_macd_hist=round(h1_bias["macd_hist"], 6),
+                h1_rsi=round(h1_bias["h1_rsi"], 1),
+                h1_trend=h1_bias["trend"],
+                entry_basis=f"D-ha-pullback suppressed: R:R {rr:.2f} < {HA_MIN_RR} minimum",
+                risk_pips=None, reward_pips=None, rr_ratio=None,
+            )
+    else:
+        if direction == "BUY":
+            sl = ep - atr * ATR_SL_MULT
+            tp = ep + atr * ATR_TP_MULT
+        else:
+            sl = ep + atr * ATR_SL_MULT
+            tp = ep - atr * ATR_TP_MULT
+        risk_pips   = abs(ep - sl) / pv
+        reward_pips = abs(tp - ep) / pv
+        rr          = reward_pips / risk_pips if risk_pips > 0 else 0
 
     pattern_labels = {
-        "A-ema-cross":  "5m EMA8/21 cross",
-        "B-ema-bounce": "5m EMA21 bounce",
-        "C-macd-flip":  "5m MACD flip",
+        "A-ema-cross":   "5m EMA8/21 cross",
+        "B-ema-bounce":  "5m EMA21 bounce",
+        "C-macd-flip":   "5m MACD flip",
+        "D-ha-pullback": "5m HA pullback",
     }
-    label = pattern_labels.get(entry.get("pattern", ""), entry.get("pattern", ""))
-    basis = (
-        f"1h {h1_bias['trend']}, MACD {'bull' if direction == 'BUY' else 'bear'}, "
-        f"{label} @ {entry['bar_time']}"
-    )
+    label = pattern_labels.get(pattern, pattern)
+    basis = f"1h {h1_bias['trend']}, {label} @ {entry['bar_time']}"
 
     return Signal(
         timestamp=now_str,
@@ -475,13 +606,19 @@ def run(symbol: str = SYMBOL) -> Signal:
     """
     console.print(f"[bold cyan]Fetching {symbol} data...[/]")
 
-    df_h1 = fetch_ohlcv(symbol, interval="1h", period="60d")
+    df_1h = fetch_ohlcv(symbol, interval="1h", period="60d")
     df_5m = fetch_ohlcv(symbol, interval="5m", period="5d")
 
-    df_h1 = compute_h1_indicators(df_h1)
+    df_1h_ind = compute_h1_indicators(df_1h.copy())
+    df_4h = df_1h.resample("4h").agg({
+        "open": "first", "high": "max", "low": "min",
+        "close": "last", "volume": "sum",
+    }).dropna()
+    df_4h = compute_h1_indicators(df_4h)
     df_5m = compute_m5_indicators(df_5m)
 
-    h1_bias = assess_h1_bias(df_h1)
+    h1_bias = assess_h1_bias(df_4h)
+    h1_bias["atr"] = float(df_1h_ind.iloc[-1]["atr"])
     entry   = find_m5_entry(df_5m, h1_bias["direction"])
     signal  = build_signal(h1_bias, entry, symbol)
 

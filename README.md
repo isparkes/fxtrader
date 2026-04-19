@@ -135,16 +135,27 @@ docker compose logs -f
 
 ## Strategy
 
-### Trend filter (1h bars — all three gates must pass)
+### Trend filter (4h bars — resampled from 1h, all three gates must pass)
+
+The trend is assessed on 4h bars built by resampling 1h OHLCV data. The most
+recent bar is still forming — `assess_h1_bias` reads `iloc[-1]` (the forming
+bar), matching live trading where waiting a full 4h for bar close is
+impractical.
 
 | Gate | BUY condition | SELL condition |
 |---|---|---|
 | EMA50 side | Close above EMA(50) | Close below EMA(50) |
-| MACD histogram | Positive **and** larger than previous bar | Negative **and** smaller (more negative) than previous bar |
+| MACD histogram sign | Positive | Negative |
 | RSI(14) | > 50 | < 50 |
 
 All three must agree simultaneously. If any gate fails the bias is `FLAT` and
 no entry is taken.
+
+### SL/TP sizing
+
+Stop loss and take profit distances are sized using the **1h ATR**, not the 4h
+ATR. The 4h bars set the direction; the 1h ATR (forward-filled onto entry bars)
+provides a sizing reference that matches the scale of the trade.
 
 ### Entry patterns (5m bars — evaluated only when bias is active)
 
@@ -172,8 +183,8 @@ Pre-checks applied to every bar:
 
 | Parameter | Value | Notes |
 |---|---|---|
-| Stop loss | ATR(14) × 0.4 | Set at entry, never widened; ~4–8 pips on EURUSD |
-| Take profit | ATR(14) × 3.0 | Wide ceiling; rarely the binding exit |
+| Stop loss | 1h ATR(14) × 0.4 | Set at entry, never widened; ~4–8 pips on EURUSD |
+| Take profit | 1h ATR(14) × 3.0 | Wide ceiling; rarely the binding exit |
 | Trailing stop — phase 1 | Move to entry (breakeven) | Triggered once price reaches 80% of the initial TP distance |
 | Trailing stop — phase 2 | Trail ATR × 0.4 behind best price | Runs from breakeven with no ceiling; exits when momentum exhausts |
 | Cooldown after loss | 6 bars (30 min in scalp mode) | Prevents revenge trading into a still-unfavourable market |
@@ -188,14 +199,14 @@ Parameters are defined at the top of each pair's indicator file
 (`indicator_eurusd.py`, `indicator_gbpusd.py`, etc.) and can be tuned
 independently per pair. The defaults are:
 
-**Trend timeframe (1h)**
+**Trend timeframe (4h, resampled from 1h)**
 
 | Parameter | Constant | Default |
 |---|---|---|
 | EMA trend | `H1_EMA_TREND` | 50 |
 | MACD | `H1_MACD_FAST / SLOW / SIGNAL` | 12 / 26 / 9 |
 | RSI | `H1_RSI_PERIOD` | 14 |
-| ATR (for SL/TP sizing) | `ATR_PERIOD` | 14 |
+| ATR (for SL/TP sizing — computed on 1h bars) | `ATR_PERIOD` | 14 |
 
 **Entry timeframe (5m)**
 
@@ -221,17 +232,18 @@ independently per pair. The defaults are:
 
 ### Scalp mode (default)
 
-- **Data:** ~60 days of 5m entry bars + 1h trend bars from Yahoo Finance
+- **Data:** ~60 days of 5m entry bars; trend from 4h bars resampled from 1h
+- **SL/TP sizing:** 1h ATR, forward-filled onto 5m bars
 - **Session filter:** active (entries restricted to 07:00–16:00 UTC)
 - **Spread:** pair-dependent (EURUSD 1.5 pips, GBPUSD 1.8 pips, etc.)
 
 ### Long mode (`--long`)
 
-- **Data:** ~730 days of 1h entry bars; trend bars resampled to 4h
+- **Data:** ~730 days of 1h entry bars; trend from 4h bars resampled from those same 1h bars
+- **SL/TP sizing:** ATR computed on the 1h entry bars (no separate sizing step needed)
 - **Session filter:** disabled (1h bars already smooth thin periods)
 - **Spread:** slightly tighter (EURUSD 1.0 pip, GBPUSD 1.2 pips, etc.)
-- **Same indicator logic** — the same indicator parameters and entry patterns
-  apply; ATR-based stops scale automatically with the larger timeframe's ATR.
+- **Same indicator logic** — entry patterns and risk parameters are identical; ATR-based stops scale automatically with the 1h ATR.
 
 The merged dataset uses `merge_asof` with `direction="backward"` so each entry
 bar receives only the most recently *completed* trend bar's values. This
@@ -321,15 +333,29 @@ the next run — no other files need editing.
 
 ## Current backtest results
 
-  ┌────────┬────────┬───────┬─────────┬──────────┬──────────────┬────────────┬────────────┬────────┐
-  │  Pair  │ Trades │ Win % │ Avg Win │ Avg Loss │ Prof. Factor │ Expectancy │ Total Pips │ Max DD │
-  ├────────┼────────┼───────┼─────────┼──────────┼──────────────┼────────────┼────────────┼────────┤
-  │ USDJPY │ 41     │ 26.8% │ 61.9    │ 10.5     │ 2.15         │ +8.9       │ +364.4     │ -80.2  │
-  ├────────┼────────┼───────┼─────────┼──────────┼──────────────┼────────────┼────────────┼────────┤
-  │ GBPUSD │ 47     │ 23.4% │ 44.8    │ 8.9      │ 1.53         │ +3.6       │ +170.7     │ -137.0 │
-  ├────────┼────────┼───────┼─────────┼──────────┼──────────────┼────────────┼────────────┼────────┤
-  │ EURUSD │ 51     │ 17.6% │ 41.0    │ 6.7      │ 1.31         │ +1.7       │ +86.6      │ -92.4  │
-  ├────────┼────────┼───────┼─────────┼──────────┼──────────────┼────────────┼────────────┼────────┤
-  │ AUDUSD │ 35     │ 25.7% │ 28.5    │ 8.0      │ 1.24         │ +1.4       │ +49.2      │ -54.4  │
-  └────────┴────────┴───────┴─────────┴──────────┴──────────────┴────────────┴────────────┴────────┘
+Results use the forming-bar approach: the trend bias reads `iloc[-1]` (current
+forming 4h bar), matching live trading where waiting for bar close is
+impractical at the 5m/1h entry timeframe.
+
+### Scalp mode — 60 days · 5m bars (as of 2026-04-19)
+
+| Pair | Trades | Win % | Avg Win | Avg Loss | Prof. Factor | Expectancy | Total Pips | Max DD |
+|---|---|---|---|---|---|---|---|---|
+| EURUSD | 111 | 25.2% | 32.1 | 7.8 | **1.40** | +2.3 | +255.5 | -175.7 |
+| USDJPY | 91 | 20.9% | 55.9 | 10.4 | **1.42** | +3.5 | +316.0 | -115.2 |
+| AUDUSD | 81 | 29.6% | 30.7 | 8.5 | **1.52** | +3.1 | +251.1 | -89.9 |
+| GBPUSD | 99 | 19.2% | 48.2 | 9.5 | **1.21** | +1.6 | +157.2 | -103.7 |
+
+### Long mode — 730 days · 1h bars (as of 2026-04-19)
+
+| Pair | Trades | Win % | Avg Win | Avg Loss | Prof. Factor | Expectancy | Total Pips | Max DD |
+|---|---|---|---|---|---|---|---|---|
+| EURUSD | 329 | 23.7% | 53.7 | 10.8 | **1.54** | +4.5 | +1469.7 | -183.2 |
+| USDJPY | 332 | 21.4% | 112.4 | 16.1 | **1.90** | +11.4 | +3770.0 | -208.7 |
+| GBPUSD | 355 | 20.0% | 77.1 | 12.6 | **1.53** | +5.4 | +1904.3 | -518.5 |
+| AUDUSD | 346 | 21.4% | 50.7 | 10.0 | **1.38** | +3.0 | +1033.9 | -159.2 |
+
+All four pairs are profitable in both modes. USDJPY shows the strongest edge in
+long mode (PF 1.90, +3770 pips). GBPUSD has the largest drawdown relative to
+total gain in long mode and warrants monitoring.
 

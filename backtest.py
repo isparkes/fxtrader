@@ -18,12 +18,13 @@ Supports two modes selectable via --long:
     structure is preserved. Use this mode for a statistically larger sample.
 
 In both modes the two datasets are joined with merge_asof so each entry bar
-carries the most recently completed trend bar's values forward-filled.
+carries the most recently started trend bar's values forward-filled.
 
 Simulation rules
 ----------------
-  - Entry and trend logic mirrors indicator.py exactly (see its docstring
-    for a full description of the filters).
+  - Trend bias and entry patterns are evaluated by calling the indicator
+    module directly (ind.assess_h1_bias, ind.find_m5_entry, ind.compute_sl_tp).
+    No indicator logic is reimplemented here.
   - One trade at a time; no new entries while a position is open.
   - Cooldown after any losing trade (COOLDOWN_BARS × bar size).
   - Session filter (07:00-16:00 UTC) applies to entries in scalp mode only.
@@ -66,7 +67,6 @@ import indicator_eurusd
 import indicator_gbpusd
 import indicator_usdjpy
 import indicator_audusd
-from indicator_eurusd import pip_value
 
 PAIRS: dict[str, str] = {
     "eurusd": "EURUSD=X",
@@ -116,6 +116,41 @@ def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _to_utc(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    if idx.tzinfo is None:
+        return idx.tz_localize("UTC")
+    return idx.tz_convert("UTC")
+
+
+def merge_trend(df_h1: pd.DataFrame, df_5m: pd.DataFrame) -> pd.DataFrame:
+    """
+    Forward-fill the trend bar's ATR onto entry bars using merge_asof.
+
+    Each entry bar receives the ATR from the most recently started trend bar
+    (direction="backward"). Both indexes are normalised to UTC before merging.
+    The column added to the entry bars is:
+        h1_atr  — trend ATR, used for SL/TP sizing
+    """
+    h1 = df_h1[["atr"]].copy()
+    h1.columns = ["h1_atr"]
+
+    h1.index    = _to_utc(h1.index)
+    df_5m       = df_5m.copy()
+    df_5m.index = _to_utc(df_5m.index)
+
+    idx_name = df_5m.index.name or "datetime"
+    h1.index.name = idx_name
+
+    merged = pd.merge_asof(
+        df_5m.reset_index(),
+        h1.reset_index(),
+        on=idx_name,
+        direction="backward",
+    )
+    merged.set_index(idx_name, inplace=True)
+    return merged
+
+
 def fetch_data(symbol: str, ind) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Scalp mode: 1h trend + 5m entry bars (~60 days)."""
     df_h1 = yf.download(symbol, interval="1h", period="60d", progress=False, auto_adjust=True)
@@ -137,186 +172,15 @@ def fetch_data_long(symbol: str, ind) -> tuple[pd.DataFrame, pd.DataFrame]:
     df_1h = flatten_columns(df_1h)
     df_1h.dropna(inplace=True)
 
-    # Resample 1h → 4h for trend context
     df_4h = df_1h.resample("4h").agg({
         "open": "first", "high": "max", "low": "min",
         "close": "last", "volume": "sum",
     }).dropna()
     df_4h = ind.compute_h1_indicators(df_4h)
 
-    # 1h bars as entry timeframe — same indicator set, different scale
     df_1h_entry = ind.compute_m5_indicators(df_1h.copy())
 
     return df_4h, df_1h_entry
-
-
-def merge_trend(df_h1: pd.DataFrame, df_5m: pd.DataFrame) -> pd.DataFrame:
-    """
-    Forward-fill trend-bar columns onto entry bars using merge_asof.
-
-    Each entry bar receives the values from the most recently completed
-    trend bar (direction="backward"). This prevents look-ahead bias: a
-    5m bar at 09:37 gets the 09:00 1h bar's values, not the 10:00 bar.
-
-    Both indexes are normalised to UTC before merging to avoid timezone
-    comparison errors. The following columns are added to the entry bars:
-        h1_macd_hist      — trend MACD histogram
-        h1_prev_macd_hist — previous trend bar's MACD histogram (for building check)
-        h1_ema_trend      — trend EMA50
-        h1_atr            — trend ATR (used for SL/TP sizing)
-        h1_close          — trend bar close
-        h1_rsi            — trend RSI(14)
-    """
-    # Pull only the columns we need from 1h; add previous-bar MACD for building check
-    h1 = df_h1[["macd_hist", "ema_trend", "atr", "close", "rsi"]].copy()
-    h1.columns = ["h1_macd_hist", "h1_ema_trend", "h1_atr", "h1_close", "h1_rsi"]
-    h1["h1_prev_macd_hist"] = h1["h1_macd_hist"].shift(1)
-
-    # Normalise both indexes to UTC-aware for safe comparison
-    def to_utc(idx):
-        if idx.tzinfo is None:
-            return idx.tz_localize("UTC")
-        return idx.tz_convert("UTC")
-
-    h1.index  = to_utc(h1.index)
-    df_5m     = df_5m.copy()
-    df_5m.index = to_utc(df_5m.index)
-
-    idx_name = df_5m.index.name or "datetime"
-    h1.index.name = idx_name
-
-    merged = pd.merge_asof(
-        df_5m.reset_index(),
-        h1.reset_index(),
-        on=idx_name,
-        direction="backward",
-    )
-    merged.set_index(idx_name, inplace=True)
-    return merged
-
-
-def h1_direction(row: pd.Series) -> str:
-    """
-    Derive the trend bias for a single entry bar from its forward-filled
-    trend columns. Mirrors the three-gate logic in assess_h1_bias():
-
-        1. Price above/below h1_ema_trend
-        2. h1_macd_hist positive/negative AND larger than h1_prev_macd_hist
-        3. h1_rsi above/below 50
-
-    Returns "BUY", "SELL", or "FLAT". Returns "FLAT" if any required
-    column is NaN (e.g. during indicator warmup at the start of the data).
-    """
-    h1_close     = row.get("h1_close")
-    h1_ema       = row.get("h1_ema_trend")
-    h1_macd      = row.get("h1_macd_hist")
-    h1_prev_macd = row.get("h1_prev_macd_hist")
-    h1_rsi       = row.get("h1_rsi")
-
-    if any(pd.isna(v) for v in [h1_close, h1_ema, h1_macd, h1_prev_macd, h1_rsi]):
-        return "FLAT"
-
-    above = float(h1_close) > float(h1_ema)
-    below = float(h1_close) < float(h1_ema)
-    # MACD building + RSI confirming momentum direction
-    bull  = float(h1_macd) > 0 and float(h1_macd) > float(h1_prev_macd) and float(h1_rsi) > 50
-    bear  = float(h1_macd) < 0 and float(h1_macd) < float(h1_prev_macd) and float(h1_rsi) < 50
-
-    if above and bull:
-        return "BUY"
-    if below and bear:
-        return "SELL"
-    return "FLAT"
-
-
-def bar_hour_utc(row: pd.Series) -> int:
-    """Extract UTC hour from the first column of a reset-index bar row."""
-    ts = row.iloc[0]
-    if hasattr(ts, "hour"):
-        if getattr(ts, "tzinfo", None) is not None:
-            ts = ts.tz_convert("UTC")
-        return ts.hour
-    return -1   # unknown — don't filter
-
-
-def check_entry(bars: pd.DataFrame, i: int, direction: str, atr_min: float) -> float | None:
-    """
-    Evaluate entry patterns on bar i, given the trend direction.
-    Mirrors find_m5_entry() exactly so backtest and live signal use
-    identical logic.
-
-    Pre-conditions checked before pattern evaluation:
-        - All required indicator columns are non-NaN.
-        - 5m ATR >= M5_ATR_MIN (market has enough volatility).
-
-    Pattern A — EMA cross:
-        BUY:  EMA8 crosses above EMA21; RSI 52-75; Stoch %K > %D and < 80.
-        SELL: EMA8 crosses below EMA21; RSI 25-48; Stoch %K < %D and > 20.
-
-    Pattern C — MACD histogram flip:
-        BUY:  MACD hist crosses zero upward; price above EMA21;
-              RSI 52-72; Stoch conditions as above.
-        SELL: MACD hist crosses zero downward; price below EMA21;
-              RSI 28-48; Stoch conditions as above.
-
-    Returns the bar's close price on a match, or None if no pattern fires.
-    """
-    if i < 3:
-        return None
-
-    bar  = bars.iloc[i]
-    prev = bars.iloc[i - 1]
-
-    close    = float(bar["close"])
-    ema_fast = bar.get("ema_fast")
-    ema_slow = bar.get("ema_slow")
-    prev_ef  = prev.get("ema_fast")
-    prev_es  = prev.get("ema_slow")
-    rsi      = bar.get("rsi")
-    hist     = bar.get("macd_hist")
-    prev_h   = prev.get("macd_hist")
-    stoch_k  = bar.get("stoch_k")
-    stoch_d  = bar.get("stoch_d")
-    atr_m5   = bar.get("atr")
-
-    if any(pd.isna(v) for v in [ema_fast, ema_slow, prev_ef, prev_es, rsi, hist, prev_h,
-                                  stoch_k, stoch_d, atr_m5]):
-        return None
-
-    ema_fast = float(ema_fast)
-    ema_slow = float(ema_slow)
-    prev_ef  = float(prev_ef)
-    prev_es  = float(prev_es)
-    rsi      = float(rsi)
-    hist     = float(hist)
-    prev_h   = float(prev_h)
-    stoch_k  = float(stoch_k)
-    stoch_d  = float(stoch_d)
-    atr_m5   = float(atr_m5)
-
-    # ATR filter: skip if market is too flat to reach the target
-    if atr_m5 < atr_min:
-        return None
-
-    if direction == "BUY":
-        stoch_ok = stoch_k > stoch_d and stoch_k < 80
-        # A: EMA8 crosses above EMA21, RSI and Stochastic confirm
-        if ema_fast > ema_slow and prev_ef <= prev_es and 52 < rsi < 75 and stoch_ok:
-            return close
-        # C: MACD histogram flips positive, RSI and Stochastic confirm
-        if hist > 0 and prev_h <= 0 and close > ema_slow and 52 < rsi < 72 and stoch_ok:
-            return close
-
-    elif direction == "SELL":
-        stoch_ok = stoch_k < stoch_d and stoch_k > 20
-        # A: EMA8 crosses below EMA21, RSI and Stochastic confirm
-        if ema_fast < ema_slow and prev_ef >= prev_es and 25 < rsi < 48 and stoch_ok:
-            return close
-        # C: MACD histogram flips negative, RSI and Stochastic confirm
-        if hist < 0 and prev_h >= 0 and close < ema_slow and 28 < rsi < 48 and stoch_ok:
-            return close
-
-    return None
 
 
 def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
@@ -326,48 +190,49 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
     """
     Walk forward through the merged entry bars, simulating trades.
 
+    Bias and entry evaluation are fully delegated to the indicator module:
+        ind.assess_h1_bias(slice)      — trend direction and ATR
+        ind.find_m5_entry(slice, bias) — entry pattern detection
+        ind.compute_sl_tp(...)         — SL/TP calculation
+
     Args:
         df_h1:        Trend-context bars with indicators already computed.
         df_5m:        Entry bars with indicators already computed.
-        bar_mins:     Duration of one entry bar in minutes (5 for scalp
-                      mode, 60 for long mode). Used to calculate held_mins.
+        bar_mins:     Duration of one entry bar in minutes.
         spread_pips:  Spread cost deducted from every trade's P&L.
-        use_session:  If True, entries are restricted to SESSION_START_UTC
-                      through SESSION_END_UTC. Set False for long mode where
-                      the 1h bars already smooth out thin periods.
+        use_session:  If True, entries are restricted to 07:00–16:00 UTC.
 
-    Returns a list of trade dicts, each containing:
-        direction, entry, exit, sl, tp, held_bars, held_mins,
-        pnl_pips, result ("WIN"/"LOSS"), forced (always False).
+    Returns a list of trade dicts.
     """
+    # Forward-fill trend ATR onto entry bars; normalises both indexes to UTC
     merged = merge_trend(df_h1, df_5m)
     bars   = merged.reset_index()
-    pv     = pip_value(symbol)
+
+    # Keep df_h1 UTC-normalised for slicing inside the loop
+    df_h1 = df_h1.copy()
+    df_h1.index = _to_utc(df_h1.index)
+    h1_times = df_h1.index
+
+    pv = ind.pip_value(symbol)
 
     trades         = []
     in_trade       = False
     cooldown_until = 0
-    trailing_sl    = None    # live stop level — starts as hard SL, moves to BE, then trails
-    trail_distance = None    # distance to trail behind best price once BE is active
-    be_activated   = False   # True once the breakeven stop has been triggered
-    direction = entry_p = sl = tp = entry_idx = None
+    trailing_sl    = None
+    trail_distance = None
+    be_activated   = False
+    direction = entry_p = sl = tp = entry_idx = atr = None
+    trail_activate_at = None
 
     for i in range(30, len(bars)):
-        row  = bars.iloc[i]
-        hour = bar_hour_utc(row)
+        row = bars.iloc[i]
+        ts  = row.iloc[0]   # UTC-aware timestamp (from merge_trend normalisation)
 
         if in_trade:
-            high  = float(row["high"])
-            low   = float(row["low"])
-            held  = i - entry_idx
+            high = float(row["high"])
+            low  = float(row["low"])
+            held = i - entry_idx
 
-            # ── Breakeven trigger → active trail ────────────────────────────
-            # Phase 1 (be_activated is False):
-            #   Once price reaches TRAIL_ACTIVATE_FRAC of the TP distance,
-            #   move SL to entry (breakeven). Risk is now zero.
-            # Phase 2 (be_activated is True):
-            #   Trail the stop behind the running best price at trail_distance.
-            #   No fixed TP ceiling — the trail exits when the move exhausts.
             if direction == "BUY":
                 if not be_activated:
                     if (high - entry_p) / pv >= trail_activate_at:
@@ -387,18 +252,15 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
                     if new_trail < trailing_sl:
                         trailing_sl = new_trail
 
-            # ── Exit conditions ──────────────────────────────────────────────
             hit_sl = (direction == "BUY"  and low  <= trailing_sl) or \
                      (direction == "SELL" and high >= trailing_sl)
             hit_tp = (direction == "BUY"  and high >= tp) or \
                      (direction == "SELL" and low  <= tp)
-            force = False  # no forced exits — trailing stop and SL/TP handle duration
 
-            if hit_tp or hit_sl or force:
-                exit_p   = tp if hit_tp else (trailing_sl if hit_sl else float(row["close"]))
+            if hit_tp or hit_sl:
+                exit_p   = tp if hit_tp else trailing_sl
                 pnl_pips = ((exit_p - entry_p) / pv) * (1 if direction == "BUY" else -1)
                 pnl_pips -= spread_pips
-
                 result = "WIN" if pnl_pips > 0 else "LOSS"
                 trades.append({
                     "direction": direction,
@@ -410,53 +272,55 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
                     "held_mins": held * bar_mins,
                     "pnl_pips":  round(pnl_pips, 1),
                     "result":    result,
-                    "forced":    force and not hit_tp and not hit_sl,
+                    "forced":    False,
                 })
                 if result == "LOSS":
                     cooldown_until = i + COOLDOWN_BARS
                 in_trade = False
-            continue   # don't look for new entries while in trade
+            continue
 
-        # ── Session filter: only enter during London/NY overlap ──────────────
-        if use_session and not (SESSION_START_UTC <= hour < SESSION_END_UTC):
+        if use_session and not (SESSION_START_UTC <= ts.hour < SESSION_END_UTC):
             continue
 
         if i < cooldown_until:
             continue
 
-        bias = h1_direction(row)
+        # ── Trend bias ────────────────────────────────────────────────────────
+        h1_end = h1_times.searchsorted(ts, side="right")
+        if h1_end < 3:
+            continue
+        bias_info = ind.assess_h1_bias(df_h1.iloc[:h1_end])
+        bias = bias_info["direction"]
         if bias == "FLAT":
             continue
 
-        atr_sl = ind.ATR_SL_MULT
-        atr_tp = ind.ATR_TP_MULT
-
-        ep = check_entry(bars, i, bias, ind.M5_ATR_MIN)
-        if ep is None:
+        # ── Entry pattern ─────────────────────────────────────────────────────
+        m5_slice     = merged.iloc[max(0, i - 35): i + 1]
+        entry_result = ind.find_m5_entry(m5_slice, bias, use_session=False)
+        if entry_result is None:
+            continue
+        if entry_result["bar_time"] != str(ts):
             continue
 
+        # ── Sizing ────────────────────────────────────────────────────────────
         h1_atr = row.get("h1_atr")
-        atr    = float(h1_atr) if not pd.isna(h1_atr) else 0.001
-        spread = SPREAD_PIPS * pv
+        atr    = float(h1_atr) if not pd.isna(h1_atr) else bias_info["atr"]
+        spread = spread_pips * pv
 
-        if bias == "BUY":
-            entry_p    = ep + spread
-            sl         = entry_p - atr * atr_sl
-            tp         = entry_p + atr * atr_tp
-        else:
-            entry_p    = ep - spread
-            sl         = entry_p + atr * atr_sl
-            tp         = entry_p - atr * atr_tp
+        sl_tp = ind.compute_sl_tp(entry_result, bias, atr, spread, pv)
+        if sl_tp is None:
+            continue
+        entry_p, sl, tp = sl_tp
 
         in_trade          = True
         direction         = bias
         entry_idx         = i
         be_activated      = False
-        trailing_sl       = sl                # starts as the hard stop
-        trail_distance    = atr * atr_sl      # distance to trail behind best price
-        # Pip distance needed before triggering breakeven (80 % of initial TP distance)
+        trailing_sl       = sl
+        trail_distance    = atr * ind.ATR_SL_MULT
         tp_distance_pips  = abs(tp - entry_p) / pv
-        trail_activate_at = tp_distance_pips * TRAIL_ACTIVATE_FRAC
+        trail_frac        = getattr(ind, "TRAIL_ACTIVATE_FRAC", TRAIL_ACTIVATE_FRAC)
+        trail_activate_at = tp_distance_pips * trail_frac
 
     return trades
 
@@ -485,19 +349,7 @@ def _compute_stats(trades: list[dict], bar_mins: int) -> dict:
 
 
 def report(trades: list[dict], bar_mins: int = 5, pair_label: str = "EURUSD") -> None:
-    """
-    Print a summary table of backtest results and save the full trade log.
-
-    Computes and displays: trade count, trades/day, win rate, avg win/loss,
-    profit factor, expectancy, total pips, max drawdown, avg hold time,
-    and forced close count.
-
-    Hold time is displayed in minutes for scalp mode (bar_mins=5) and in
-    hours for long mode (bar_mins=60). The trading_days denominator used
-    to calculate trades/day is inferred from the mode.
-
-    Saves the full trade-by-trade DataFrame to {pair_label}_backtest_trades.csv.
-    """
+    """Print a summary table and save the full trade log to CSV."""
     if not trades:
         console.print("[yellow]No trades generated.[/]")
         return
@@ -518,19 +370,19 @@ def report(trades: list[dict], bar_mins: int = 5, pair_label: str = "EURUSD") ->
     table.add_column("Metric", style="dim")
     table.add_column("Value",  justify="right")
 
-    table.add_row("Total trades",     str(s["n"]))
-    table.add_row("Trades / day",     f"{s['trades_per_day']:.1f}")
-    table.add_row("Wins",             str(s["wins"]))
-    table.add_row("Losses",           str(s["losses"]))
-    table.add_row("Win rate",         f"{s['wr']:.1f}%")
-    table.add_row("Avg win",          f"{s['aw']:.1f} pips")
-    table.add_row("Avg loss",         f"{s['al']:.1f} pips")
-    table.add_row("Profit factor",    f"{s['pf']:.2f}")
-    table.add_row("Expectancy",       f"{s['exp']:.1f} pips/trade")
-    table.add_row("Total pips",       f"[{'green' if s['total'] > 0 else 'red'}]{s['total']:.1f}[/]")
-    table.add_row("Max drawdown",     f"[red]{s['max_dd']:.1f} pips[/]")
-    table.add_row("Avg hold time",    hold_str)
-    table.add_row("Forced closes",    str(s["forced"]))
+    table.add_row("Total trades",  str(s["n"]))
+    table.add_row("Trades / day",  f"{s['trades_per_day']:.1f}")
+    table.add_row("Wins",          str(s["wins"]))
+    table.add_row("Losses",        str(s["losses"]))
+    table.add_row("Win rate",      f"{s['wr']:.1f}%")
+    table.add_row("Avg win",       f"{s['aw']:.1f} pips")
+    table.add_row("Avg loss",      f"{s['al']:.1f} pips")
+    table.add_row("Profit factor", f"{s['pf']:.2f}")
+    table.add_row("Expectancy",    f"{s['exp']:.1f} pips/trade")
+    table.add_row("Total pips",    f"[{'green' if s['total'] > 0 else 'red'}]{s['total']:.1f}[/]")
+    table.add_row("Max drawdown",  f"[red]{s['max_dd']:.1f} pips[/]")
+    table.add_row("Avg hold time", hold_str)
+    table.add_row("Forced closes", str(s["forced"]))
 
     console.print(table)
 
@@ -540,38 +392,21 @@ def report(trades: list[dict], bar_mins: int = 5, pair_label: str = "EURUSD") ->
 
 
 def report_all(results: list[tuple[str, list[dict]]], bar_mins: int = 5) -> None:
-    """
-    Print a single comparison table covering every pair that was run.
+    """Print a combined comparison table for all pairs."""
+    mode_label = "730d · 1h bars" if bar_mins >= 60 else "60d · 5m bars"
 
-    Columns: Pair | Trades | Win% | Avg W | Avg L | PF | Expectancy | Total pips | Max DD
-    Rows are sorted by total pips descending so the best pair floats to the top.
-    """
-    if bar_mins >= 60:
-        mode_label = "730d · 1h bars"
-    else:
-        mode_label = "60d · 5m bars"
+    table = Table(title=f"All-Pairs Summary  ({mode_label})", box=box.ROUNDED)
+    table.add_column("Pair",         style="bold")
+    table.add_column("Trades",       justify="right")
+    table.add_column("Win %",        justify="right")
+    table.add_column("Avg W",        justify="right")
+    table.add_column("Avg L",        justify="right")
+    table.add_column("Prof. Factor", justify="right")
+    table.add_column("Expectancy",   justify="right")
+    table.add_column("Total pips",   justify="right")
+    table.add_column("Max DD",       justify="right")
 
-    table = Table(
-        title=f"All-Pairs Summary  ({mode_label})",
-        box=box.ROUNDED,
-    )
-    table.add_column("Pair",        style="bold")
-    table.add_column("Trades",      justify="right")
-    table.add_column("Win %",       justify="right")
-    table.add_column("Avg W",       justify="right")
-    table.add_column("Avg L",       justify="right")
-    table.add_column("Prof. Factor",justify="right")
-    table.add_column("Expectancy",  justify="right")
-    table.add_column("Total pips",  justify="right")
-    table.add_column("Max DD",      justify="right")
-
-    rows = []
-    for pair_label, trades in results:
-        if not trades:
-            rows.append((pair_label, None))
-        else:
-            rows.append((pair_label, _compute_stats(trades, bar_mins)))
-
+    rows = [(lbl, _compute_stats(t, bar_mins) if t else None) for lbl, t in results]
     rows.sort(key=lambda r: r[1]["total"] if r[1] else float("-inf"), reverse=True)
 
     for pair_label, s in rows:
@@ -610,8 +445,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.all:
-        bar_mins   = 60 if args.long else 5
-        mode_desc  = "long mode · 730d · 1h bars" if args.long else "scalp mode · 60d · 5m bars"
+        bar_mins  = 60 if args.long else 5
+        mode_desc = "long mode · 730d · 1h bars" if args.long else "scalp mode · 60d · 5m bars"
         console.print(f"[bold cyan]Running all pairs ({mode_desc})...[/]")
         all_results: list[tuple[str, list[dict]]] = []
         for pair_key in PAIRS:
