@@ -62,13 +62,25 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
-from indicator import (
-    PAIRS,
-    ATR_SL_MULT, ATR_TP_MULT,
-    H1_EMA_TREND, H1_MACD_FAST, H1_MACD_SLOW, H1_MACD_SIGNAL, H1_RSI_PERIOD,
-    M5_EMA_FAST, M5_EMA_SLOW, M5_RSI_PERIOD, M5_STOCH_PERIOD, M5_STOCH_SMOOTH, M5_ATR_MIN,
-    compute_h1_indicators, compute_m5_indicators, pip_value,
-)
+import indicator_eurusd
+import indicator_gbpusd
+import indicator_usdjpy
+import indicator_audusd
+from indicator_eurusd import pip_value
+
+PAIRS: dict[str, str] = {
+    "eurusd": "EURUSD=X",
+    "gbpusd": "GBPUSD=X",
+    "usdjpy": "USDJPY=X",
+    "audusd": "AUDUSD=X",
+}
+
+PAIR_INDICATORS = {
+    "eurusd": indicator_eurusd,
+    "gbpusd": indicator_gbpusd,
+    "usdjpy": indicator_usdjpy,
+    "audusd": indicator_audusd,
+}
 
 # ── Per-pair spread defaults ──────────────────────────────────────────────────
 # spread_scalp: typical spread in pips for 5m scalp mode
@@ -104,22 +116,22 @@ def flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def fetch_data(symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def fetch_data(symbol: str, ind) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Scalp mode: 1h trend + 5m entry bars (~60 days)."""
     df_h1 = yf.download(symbol, interval="1h", period="60d", progress=False, auto_adjust=True)
     df_h1 = flatten_columns(df_h1)
     df_h1.dropna(inplace=True)
-    df_h1 = compute_h1_indicators(df_h1)
+    df_h1 = ind.compute_h1_indicators(df_h1)
 
     df_5m = yf.download(symbol, interval="5m", period="60d", progress=False, auto_adjust=True)
     df_5m = flatten_columns(df_5m)
     df_5m.dropna(inplace=True)
-    df_5m = compute_m5_indicators(df_5m)
+    df_5m = ind.compute_m5_indicators(df_5m)
 
     return df_h1, df_5m
 
 
-def fetch_data_long(symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def fetch_data_long(symbol: str, ind) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Long mode: 4h trend (resampled) + 1h entry bars (~730 days)."""
     df_1h = yf.download(symbol, interval="1h", period="730d", progress=False, auto_adjust=True)
     df_1h = flatten_columns(df_1h)
@@ -130,10 +142,10 @@ def fetch_data_long(symbol: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         "open": "first", "high": "max", "low": "min",
         "close": "last", "volume": "sum",
     }).dropna()
-    df_4h = compute_h1_indicators(df_4h)
+    df_4h = ind.compute_h1_indicators(df_4h)
 
     # 1h bars as entry timeframe — same indicator set, different scale
-    df_1h_entry = compute_m5_indicators(df_1h.copy())
+    df_1h_entry = ind.compute_m5_indicators(df_1h.copy())
 
     return df_4h, df_1h_entry
 
@@ -227,7 +239,7 @@ def bar_hour_utc(row: pd.Series) -> int:
     return -1   # unknown — don't filter
 
 
-def check_entry(bars: pd.DataFrame, i: int, direction: str) -> float | None:
+def check_entry(bars: pd.DataFrame, i: int, direction: str, atr_min: float) -> float | None:
     """
     Evaluate entry patterns on bar i, given the trend direction.
     Mirrors find_m5_entry() exactly so backtest and live signal use
@@ -283,7 +295,7 @@ def check_entry(bars: pd.DataFrame, i: int, direction: str) -> float | None:
     atr_m5   = float(atr_m5)
 
     # ATR filter: skip if market is too flat to reach the target
-    if atr_m5 < M5_ATR_MIN:
+    if atr_m5 < atr_min:
         return None
 
     if direction == "BUY":
@@ -309,7 +321,8 @@ def check_entry(bars: pd.DataFrame, i: int, direction: str) -> float | None:
 
 def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
                  bar_mins: int = 5, spread_pips: float = SPREAD_PIPS,
-                 use_session: bool = True, symbol: str = "EURUSD=X") -> list[dict]:
+                 use_session: bool = True, symbol: str = "EURUSD=X",
+                 ind=None) -> list[dict]:
     """
     Walk forward through the merged entry bars, simulating trades.
 
@@ -415,7 +428,10 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
         if bias == "FLAT":
             continue
 
-        ep = check_entry(bars, i, bias)
+        atr_sl = ind.ATR_SL_MULT
+        atr_tp = ind.ATR_TP_MULT
+
+        ep = check_entry(bars, i, bias, ind.M5_ATR_MIN)
         if ep is None:
             continue
 
@@ -425,19 +441,19 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
 
         if bias == "BUY":
             entry_p    = ep + spread
-            sl         = entry_p - atr * ATR_SL_MULT
-            tp         = entry_p + atr * ATR_TP_MULT
+            sl         = entry_p - atr * atr_sl
+            tp         = entry_p + atr * atr_tp
         else:
             entry_p    = ep - spread
-            sl         = entry_p + atr * ATR_SL_MULT
-            tp         = entry_p - atr * ATR_TP_MULT
+            sl         = entry_p + atr * atr_sl
+            tp         = entry_p - atr * atr_tp
 
         in_trade          = True
         direction         = bias
         entry_idx         = i
         be_activated      = False
-        trailing_sl       = sl                  # starts as the hard stop
-        trail_distance    = atr * ATR_SL_MULT   # distance to trail behind best price
+        trailing_sl       = sl                # starts as the hard stop
+        trail_distance    = atr * atr_sl      # distance to trail behind best price
         # Pip distance needed before triggering breakeven (80 % of initial TP distance)
         tp_distance_pips  = abs(tp - entry_p) / pv
         trail_activate_at = tp_distance_pips * TRAIL_ACTIVATE_FRAC
@@ -602,16 +618,19 @@ if __name__ == "__main__":
             symbol     = PAIRS[pair_key]
             pair_label = pair_key.upper()
             cfg        = PAIR_CONFIG[pair_key]
+            ind        = PAIR_INDICATORS[pair_key]
             console.print(f"  [dim]Fetching {pair_label}...[/]")
             if args.long:
-                df_trend, df_entry = fetch_data_long(symbol)
+                df_trend, df_entry = fetch_data_long(symbol, ind)
                 trades = run_backtest(df_trend, df_entry, bar_mins=60,
-                                      spread_pips=cfg["spread_long"], use_session=False, symbol=symbol)
+                                      spread_pips=cfg["spread_long"], use_session=False,
+                                      symbol=symbol, ind=ind)
                 report(trades, bar_mins=60, pair_label=pair_label)
             else:
-                df_trend, df_entry = fetch_data(symbol)
+                df_trend, df_entry = fetch_data(symbol, ind)
                 trades = run_backtest(df_trend, df_entry, bar_mins=5,
-                                      spread_pips=cfg["spread_scalp"], use_session=True, symbol=symbol)
+                                      spread_pips=cfg["spread_scalp"], use_session=True,
+                                      symbol=symbol, ind=ind)
                 report(trades, bar_mins=5, pair_label=pair_label)
             all_results.append((pair_label, trades))
         report_all(all_results, bar_mins=bar_mins)
@@ -619,16 +638,19 @@ if __name__ == "__main__":
         symbol     = PAIRS[args.pair]
         pair_label = args.pair.upper()
         cfg        = PAIR_CONFIG[args.pair]
+        ind        = PAIR_INDICATORS[args.pair]
 
         if args.long:
             console.print(f"[bold cyan]Running {pair_label} Scalper backtest (long mode · 730d · 1h bars)...[/]")
-            df_trend, df_entry = fetch_data_long(symbol)
+            df_trend, df_entry = fetch_data_long(symbol, ind)
             trades = run_backtest(df_trend, df_entry, bar_mins=60,
-                                  spread_pips=cfg["spread_long"], use_session=False, symbol=symbol)
+                                  spread_pips=cfg["spread_long"], use_session=False,
+                                  symbol=symbol, ind=ind)
             report(trades, bar_mins=60, pair_label=pair_label)
         else:
             console.print(f"[bold cyan]Running {pair_label} Scalper backtest (scalp mode · 60d · 5m bars)...[/]")
-            df_trend, df_entry = fetch_data(symbol)
+            df_trend, df_entry = fetch_data(symbol, ind)
             trades = run_backtest(df_trend, df_entry, bar_mins=5,
-                                  spread_pips=cfg["spread_scalp"], use_session=True, symbol=symbol)
+                                  spread_pips=cfg["spread_scalp"], use_session=True,
+                                  symbol=symbol, ind=ind)
             report(trades, bar_mins=5, pair_label=pair_label)

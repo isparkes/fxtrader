@@ -48,12 +48,26 @@ import pandas as pd
 import yfinance as yf
 from dotenv import load_dotenv
 
-from indicator import (
-    PAIRS,
-    ATR_SL_MULT, ATR_TP_MULT,
-    compute_h1_indicators, compute_m5_indicators,
-    assess_h1_bias, find_m5_entry, build_signal, pip_value,
-)
+import indicator_eurusd
+import indicator_gbpusd
+import indicator_usdjpy
+import indicator_audusd
+from indicator_eurusd import pip_value
+
+# The 4 actively traded pairs and their indicator modules.
+PAIRS: dict[str, str] = {
+    "eurusd": "EURUSD=X",
+    "gbpusd": "GBPUSD=X",
+    "usdjpy": "USDJPY=X",
+    "audusd": "AUDUSD=X",
+}
+
+PAIR_INDICATORS = {
+    "eurusd": indicator_eurusd,
+    "gbpusd": indicator_gbpusd,
+    "usdjpy": indicator_usdjpy,
+    "audusd": indicator_audusd,
+}
 from mailer import send_email
 import tradelog
 
@@ -401,8 +415,9 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
         return state
 
     # Compute indicators on copies to avoid polluting the cache
-    df_h1 = compute_h1_indicators(state.cache_h1.copy())
-    df_5m = compute_m5_indicators(state.cache_5m.copy())
+    ind   = PAIR_INDICATORS[pair]
+    df_h1 = ind.compute_h1_indicators(state.cache_h1.copy())
+    df_5m = ind.compute_m5_indicators(state.cache_5m.copy())
 
     # ── Manage open position ──────────────────────────────────────────────────
     if state.position is not None:
@@ -461,8 +476,8 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
                   pair.upper(), state.cooldown_until.strftime("%H:%M UTC"))
         return state
 
-    h1_bias = assess_h1_bias(df_h1)
-    entry   = find_m5_entry(df_5m, h1_bias["direction"])
+    h1_bias = ind.assess_h1_bias(df_h1)
+    entry   = ind.find_m5_entry(df_5m, h1_bias["direction"])
 
     if h1_bias["direction"] == "FLAT":
         log.debug("%s  1h bias FLAT", pair.upper())
@@ -477,7 +492,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
         log.debug("%s  duplicate signal bar (%s) — skipped", pair.upper(), entry["bar_time"])
         return state
 
-    signal = build_signal(h1_bias, entry, symbol)
+    signal = ind.build_signal(h1_bias, entry, symbol)
     if signal.direction == "FLAT":
         return state
 

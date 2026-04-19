@@ -28,38 +28,36 @@ cp .env.example .env
 
 ---
 
-## Interactive Mode (`indicator.py`)
+## Interactive Mode (per-pair indicator scripts)
 
-Run on demand to get an immediate signal for one or more pairs.
+Each active pair has its own indicator file. Run it directly to get an
+immediate signal.
 
 ### Basic usage
 
 ```bash
-# Single pair (default: EURUSD)
-python indicator.py
+# Signal for a specific pair
+python indicator_eurusd.py
+python indicator_gbpusd.py
+python indicator_usdjpy.py
+python indicator_audusd.py
 
-# Specific pair
-python indicator.py --pair gbpusd
-
-# All supported pairs at once
-python indicator.py --all
-
-# Suppress FLAT (no-signal) results
-python indicator.py --all --quiet
+# Suppress FLAT (no-signal) output
+python indicator_eurusd.py --quiet
 ```
 
-### Supported pairs
+### Active pairs
 
-| Key      | Ticker      | Description      |
-|----------|-------------|------------------|
-| eurusd   | EURUSD=X    | Euro / US Dollar |
-| gbpusd   | GBPUSD=X    | Cable            |
-| usdjpy   | USDJPY=X    | Dollar / Yen     |
-| audusd   | AUDUSD=X    | Aussie Dollar    |
-| usdcad   | USDCAD=X    | Dollar / Loonie  |
-| usdchf   | USDCHF=X    | Dollar / Swissie |
-| nzdusd   | NZDUSD=X    | Kiwi Dollar      |
-| eurgbp   | EURGBP=X    | Euro / Sterling  |
+| Script | Pair | Ticker |
+|--------|------|--------|
+| `indicator_eurusd.py` | Euro / US Dollar | `EURUSD=X` |
+| `indicator_gbpusd.py` | Cable — British Pound / US Dollar | `GBPUSD=X` |
+| `indicator_usdjpy.py` | US Dollar / Japanese Yen | `USDJPY=X` |
+| `indicator_audusd.py` | Australian Dollar / US Dollar | `AUDUSD=X` |
+
+Each file contains its own tunable parameter block at the top. Changing
+values there affects only that pair — `daemon.py` and `backtest.py`
+both dispatch to the correct file automatically.
 
 ### Output
 
@@ -156,11 +154,11 @@ ensure persistence across container restarts.
 ### Starting the daemon
 
 ```bash
-# Watch all pairs (default), poll every 5 minutes
+# Watch all 4 active pairs (default), poll every 5 minutes
 python daemon.py
 
 # Watch a single pair
-python daemon.py --pair eurusd
+python daemon.py --pair usdjpy
 
 # Custom poll interval (seconds)
 python daemon.py --interval 60
@@ -243,18 +241,20 @@ launchctl unload ~/Library/LaunchAgents/com.fxtrader.daemon.plist
 ## Backtesting (`backtest.py`)
 
 Walk-forward simulation of the strategy against historical data.
+Each pair's backtest uses the parameters from its own indicator file,
+so changes there are reflected immediately in the next run.
 
 ```bash
-# Scalp mode — 60 days, 5m entry bars
+# Scalp mode — 60 days, 5m entry bars (single pair)
 python backtest.py --pair eurusd
 
 # Long mode — 730 days, 1h entry bars (larger sample)
 python backtest.py --pair eurusd --long
 
-# All pairs, scalp mode
+# All 4 pairs, scalp mode — prints a combined summary table
 python backtest.py --all
 
-# All pairs, long mode
+# All 4 pairs, long mode
 python backtest.py --all --long
 ```
 

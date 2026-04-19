@@ -9,7 +9,10 @@ historical data via the walk-forward backtest.
 
 | File | Purpose |
 |---|---|
-| `indicator.py` | Live signal generator — fetches current market data and prints the trading signal |
+| `indicator_eurusd.py` | Signal logic and parameters for EURUSD |
+| `indicator_gbpusd.py` | Signal logic and parameters for GBPUSD |
+| `indicator_usdjpy.py` | Signal logic and parameters for USDJPY |
+| `indicator_audusd.py` | Signal logic and parameters for AUDUSD |
 | `daemon.py` | Long-running daemon — polls pairs, manages positions, sends email alerts |
 | `mailer.py` | SMTP email helper used by the daemon |
 | `tradelog.py` | Append-only trade journal (`trades.jsonl`) — persists positions across daemon restarts |
@@ -18,20 +21,17 @@ historical data via the walk-forward backtest.
 | `trades.jsonl` | Daemon trade log — one JSON line per OPEN / BE / CLOSE event |
 | `{pair}_backtest_trades.csv` | Trade-by-trade backtest output (one file per pair) |
 
-## Supported pairs
+## Active pairs
 
-Pass `--pair` to either script. The argument accepts the short name below.
+The system trades the four most profitable pairs, each with its own indicator
+file so signal parameters and risk settings can be tuned independently.
 
-| `--pair` | Pair | Yahoo symbol |
+| Indicator file | Pair | Yahoo symbol |
 |---|---|---|
-| `eurusd` (default) | Euro / US Dollar | `EURUSD=X` |
-| `gbpusd` | Cable — British Pound / US Dollar | `GBPUSD=X` |
-| `usdjpy` | US Dollar / Japanese Yen | `USDJPY=X` |
-| `audusd` | Australian Dollar / US Dollar | `AUDUSD=X` |
-| `usdcad` | US Dollar / Canadian Dollar | `USDCAD=X` |
-| `usdchf` | US Dollar / Swiss Franc | `USDCHF=X` |
-| `nzdusd` | New Zealand Dollar / US Dollar | `NZDUSD=X` |
-| `eurgbp` | Euro / British Pound | `EURGBP=X` |
+| `indicator_eurusd.py` | Euro / US Dollar | `EURUSD=X` |
+| `indicator_gbpusd.py` | Cable — British Pound / US Dollar | `GBPUSD=X` |
+| `indicator_usdjpy.py` | US Dollar / Japanese Yen | `USDJPY=X` |
+| `indicator_audusd.py` | Australian Dollar / US Dollar | `AUDUSD=X` |
 
 ## Quick start
 
@@ -39,17 +39,18 @@ Pass `--pair` to either script. The argument accepts the short name below.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# Live signal (EURUSD, default)
-python indicator.py
+# Live signal for a specific pair
+python indicator_eurusd.py
+python indicator_usdjpy.py
 
-# Live signal (Cable)
-python indicator.py --pair gbpusd
-
-# Backtest — scalp mode, ~60 days of 5m bars
+# Backtest a single pair — scalp mode, ~60 days of 5m bars
 python backtest.py --pair gbpusd
 
-# Backtest — long mode, ~730 days of 1h bars
+# Backtest a single pair — long mode, ~730 days of 1h bars
 python backtest.py --pair gbpusd --long
+
+# Backtest all 4 pairs and show combined summary table
+python backtest.py --all
 ```
 
 ---
@@ -183,24 +184,36 @@ reached, and lets genuine trends run.
 
 ### Indicator parameters
 
+Parameters are defined at the top of each pair's indicator file
+(`indicator_eurusd.py`, `indicator_gbpusd.py`, etc.) and can be tuned
+independently per pair. The defaults are:
+
 **Trend timeframe (1h)**
 
-| Indicator | Setting |
-|---|---|
-| EMA trend | 50 |
-| MACD | 12 / 26 / 9 |
-| RSI | 14 |
-| ATR (for SL/TP sizing) | 14 |
+| Parameter | Constant | Default |
+|---|---|---|
+| EMA trend | `H1_EMA_TREND` | 50 |
+| MACD | `H1_MACD_FAST / SLOW / SIGNAL` | 12 / 26 / 9 |
+| RSI | `H1_RSI_PERIOD` | 14 |
+| ATR (for SL/TP sizing) | `ATR_PERIOD` | 14 |
 
 **Entry timeframe (5m)**
 
-| Indicator | Setting |
-|---|---|
-| EMA fast / slow | 8 / 21 |
-| RSI | 7 (short period for responsiveness) |
-| MACD | 6 / 13 / 4 (faster than trend MACD) |
-| Stochastic | 14 / 3 |
-| ATR | 14 |
+| Parameter | Constant | Default |
+|---|---|---|
+| EMA fast / slow | `M5_EMA_FAST / SLOW` | 8 / 21 |
+| RSI | `M5_RSI_PERIOD` | 7 |
+| MACD | (hard-coded 6 / 13 / 4) | — |
+| Stochastic | `M5_STOCH_PERIOD / SMOOTH` | 14 / 3 |
+| ATR | `ATR_PERIOD` | 14 |
+| ATR floor | `M5_ATR_MIN` | 0.0002 |
+
+**Risk**
+
+| Parameter | Constant | Default |
+|---|---|---|
+| Stop loss multiplier | `ATR_SL_MULT` | 0.4 |
+| Take profit multiplier | `ATR_TP_MULT` | 3.0 |
 
 ---
 
@@ -232,10 +245,6 @@ prevents look-ahead bias.
 | GBPUSD | 1.8 pips | 1.2 pips |
 | USDJPY | 1.5 pips | 1.0 pip |
 | AUDUSD | 1.8 pips | 1.2 pips |
-| USDCAD | 2.0 pips | 1.5 pips |
-| USDCHF | 2.0 pips | 1.5 pips |
-| NZDUSD | 2.5 pips | 2.0 pips |
-| EURGBP | 1.5 pips | 1.0 pip |
 
 ---
 
@@ -270,19 +279,57 @@ Saves the full trade-by-trade log to `{pair}_backtest_trades.csv` with columns:
 
 ---
 
+## Tuning a pair
+
+Each pair's strategy parameters live entirely in its own indicator file.
+To adjust EURUSD, for example, open `indicator_eurusd.py` and edit the
+constants in the *Tunable parameters* block near the top:
+
+```python
+ATR_SL_MULT = 0.4   # widen or tighten the stop
+ATR_TP_MULT = 3.0   # adjust the TP ceiling
+M5_ATR_MIN  = 0.0002  # raise to filter quieter sessions
+```
+
+Changes are picked up automatically by `daemon.py` and `backtest.py` on
+the next run — no other files need editing.
+
 ## Adding a new pair
 
-1. Add it to `PAIRS` in `indicator.py`:
-   ```python
-   "eurjpy": "EURJPY=X",
+1. Copy an existing indicator file and rename it:
+   ```bash
+   cp indicator_eurusd.py indicator_eurjpy.py
    ```
-2. Add spread defaults to `PAIR_CONFIG` in `backtest.py`:
+2. In `indicator_eurjpy.py` update the `PAIRS` dict and `SYMBOL`:
+   ```python
+   PAIRS  = {"eurjpy": "EURJPY=X"}
+   SYMBOL = "EURJPY=X"
+   ```
+3. Register the module in **both** `daemon.py` and `backtest.py`:
+   ```python
+   import indicator_eurjpy
+   PAIRS["eurjpy"] = "EURJPY=X"
+   PAIR_INDICATORS["eurjpy"] = indicator_eurjpy
+   ```
+4. Add spread defaults to `PAIR_CONFIG` in `backtest.py`:
    ```python
    "eurjpy": {"spread_scalp": 1.5, "spread_long": 1.0},
    ```
-3. That's it — both scripts will accept `--pair eurjpy` immediately.
 
-> **Note:** For JPY pairs the pip value is 0.01 (not 0.0001). The current
-> `PIP_VALUE` constant in `backtest.py` is set to 0.0001 and the pip-based
-> metrics will be off by a factor of 100 for any JPY pair. Adjust `PIP_VALUE`
-> to a per-pair value if you intend to use JPY pairs seriously.
+> **JPY pairs:** the pip value is 0.01 (not 0.0001). `pip_value()` in the
+> indicator files handles this automatically — no manual adjustment needed.
+
+## Current backtest results
+
+  ┌────────┬────────┬───────┬─────────┬──────────┬──────────────┬────────────┬────────────┬────────┐
+  │  Pair  │ Trades │ Win % │ Avg Win │ Avg Loss │ Prof. Factor │ Expectancy │ Total Pips │ Max DD │
+  ├────────┼────────┼───────┼─────────┼──────────┼──────────────┼────────────┼────────────┼────────┤
+  │ USDJPY │ 41     │ 26.8% │ 61.9    │ 10.5     │ 2.15         │ +8.9       │ +364.4     │ -80.2  │
+  ├────────┼────────┼───────┼─────────┼──────────┼──────────────┼────────────┼────────────┼────────┤
+  │ GBPUSD │ 47     │ 23.4% │ 44.8    │ 8.9      │ 1.53         │ +3.6       │ +170.7     │ -137.0 │
+  ├────────┼────────┼───────┼─────────┼──────────┼──────────────┼────────────┼────────────┼────────┤
+  │ EURUSD │ 51     │ 17.6% │ 41.0    │ 6.7      │ 1.31         │ +1.7       │ +86.6      │ -92.4  │
+  ├────────┼────────┼───────┼─────────┼──────────┼──────────────┼────────────┼────────────┼────────┤
+  │ AUDUSD │ 35     │ 25.7% │ 28.5    │ 8.0      │ 1.24         │ +1.4       │ +49.2      │ -54.4  │
+  └────────┴────────┴───────┴─────────┴──────────┴──────────────┴────────────┴────────────┴────────┘
+
