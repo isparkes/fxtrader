@@ -143,7 +143,7 @@ ATR_TP_MULT     = 3.0   # wide ceiling — trailing stop usually exits first
 
 # Pattern D — HA pullback stop parameters
 HA_SL_BUFFER_PIPS = 2     # pips added beyond the pullback extreme
-HA_SL_MIN_PIPS    = 7     # floor: stop can't be tighter than this
+HA_SL_MIN_PIPS    = 10    # floor: stop can't be tighter than this
 HA_SL_MAX_PIPS    = 12    # ceiling: stop can't be wider than this
 HA_MIN_RR         = 1.5   # suppress signal if clamped R:R falls below this
 

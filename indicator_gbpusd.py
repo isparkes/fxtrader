@@ -148,7 +148,7 @@ ATR_TP_MULT       = 3.0   # wide ceiling — trailing stop usually exits first
 
 # Pattern D — HA pullback stop parameters
 HA_SL_BUFFER_PIPS = 2
-HA_SL_MIN_PIPS    = 7
+HA_SL_MIN_PIPS    = 10
 HA_SL_MAX_PIPS    = 12
 HA_MIN_RR         = 1.5
 

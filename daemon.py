@@ -220,7 +220,8 @@ def check_position_events(pos: Position, bar: pd.Series) -> list[tuple[str, floa
     if not pos.be_activated:
         pv            = PAIR_INDICATORS[pos.pair].pip_value(pos.pair)
         tp_dist_pips  = abs(pos.take_profit - pos.entry_price) / pv
-        activate_pips = tp_dist_pips * TRAIL_ACTIVATE_FRAC
+        trail_frac    = getattr(PAIR_INDICATORS[pos.pair], "TRAIL_ACTIVATE_FRAC", TRAIL_ACTIVATE_FRAC)
+        activate_pips = tp_dist_pips * trail_frac
         progress = (
             (high - pos.entry_price) if pos.direction == "BUY"
             else (pos.entry_price - low)
