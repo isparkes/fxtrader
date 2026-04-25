@@ -59,7 +59,7 @@ python backtest.py --all
 
 ### Prerequisites
 
-Create a `.env` file with your email credentials before building (see `mailer.py` for the required variables). The file is copied into the image at build time and is also passed via `env_file` in Compose so runtime overrides work too.
+Create a `.env` file with your email credentials (see `mailer.py` for the required variables). The file is **not** baked into the image — it is passed at runtime via `--env-file` in `docker run` or via `env_file:` in Compose.
 
 ### Build
 

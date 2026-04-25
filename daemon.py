@@ -52,13 +52,14 @@ import indicator_eurusd
 import indicator_gbpusd
 import indicator_usdjpy
 import indicator_audusd
+import indicator_btcusd
 
-# The 4 actively traded pairs and their indicator modules.
 PAIRS: dict[str, str] = {
     "eurusd": "EURUSD=X",
     "gbpusd": "GBPUSD=X",
     "usdjpy": "USDJPY=X",
     "audusd": "AUDUSD=X",
+    "btcusd": "BTC-USD",
 }
 
 PAIR_INDICATORS = {
@@ -66,6 +67,7 @@ PAIR_INDICATORS = {
     "gbpusd": indicator_gbpusd,
     "usdjpy": indicator_usdjpy,
     "audusd": indicator_audusd,
+    "btcusd": indicator_btcusd,
 }
 from mailer import send_email
 import tradelog
@@ -251,21 +253,29 @@ def check_position_events(pos: Position, bar: pd.Series) -> list[tuple[str, floa
 
 # ── Email body builders ───────────────────────────────────────────────────────
 
+def _fmt(pos: Position) -> tuple[str, str]:
+    """Return (price_format, unit_label) appropriate for the pair."""
+    if "BTC" in pos.pair.upper():
+        return ".2f", "$"
+    return ".5f", "pips"
+
+
 def _email_open(pos: Position) -> tuple[str, str]:
+    pfmt, unit = _fmt(pos)
     arrow   = "UP" if pos.direction == "BUY" else "DOWN"
     subject = (
         f"[{pos.pair.upper()}] {arrow} {pos.direction} — "
-        f"Entry {pos.entry_price:.5f}"
+        f"Entry {pos.entry_price:{pfmt}}"
     )
     body = "\n".join([
         f"Trade Opened : {pos.pair.upper()} {pos.direction}",
         f"Timestamp    : {pos.opened_at}",
         "",
-        f"Entry        : {pos.entry_price:.5f}",
-        f"Stop Loss    : {pos.stop_loss:.5f}  ({pos.risk_pips:.1f} pips)",
-        f"Take Profit  : {pos.take_profit:.5f}  ({pos.reward_pips:.1f} pips)",
+        f"Entry        : {pos.entry_price:{pfmt}}",
+        f"Stop Loss    : {pos.stop_loss:{pfmt}}  ({pos.risk_pips:.1f} {unit})",
+        f"Take Profit  : {pos.take_profit:{pfmt}}  ({pos.reward_pips:.1f} {unit})",
         f"R:R          : 1 : {pos.rr_ratio:.2f}",
-        f"ATR(14) 1h   : {pos.atr:.5f}",
+        f"ATR(14) 1h   : {pos.atr:{pfmt}}",
         "",
         f"Basis: {pos.basis}",
     ])
@@ -273,18 +283,20 @@ def _email_open(pos: Position) -> tuple[str, str]:
 
 
 def _email_be(pos: Position) -> tuple[str, str]:
+    pfmt, unit = _fmt(pos)
     subject = f"[{pos.pair.upper()}] {pos.direction} — Stop Moved to Breakeven"
     body = "\n".join([
         f"Breakeven triggered on {pos.pair.upper()} {pos.direction}",
         "",
-        f"Entry        : {pos.entry_price:.5f}",
-        f"New SL       : {pos.entry_price:.5f}  (breakeven — risk now zero)",
-        f"TP still live: {pos.take_profit:.5f}  ({pos.reward_pips:.1f} pips remaining)",
+        f"Entry        : {pos.entry_price:{pfmt}}",
+        f"New SL       : {pos.entry_price:{pfmt}}  (breakeven — risk now zero)",
+        f"TP still live: {pos.take_profit:{pfmt}}  ({pos.reward_pips:.1f} {unit} remaining)",
     ])
     return subject, body
 
 
 def _email_close(pos: Position, event: str, exit_price: float) -> tuple[str, str]:
+    pfmt, unit = _fmt(pos)
     pnl_pips = (
         (exit_price - pos.entry_price) if pos.direction == "BUY"
         else (pos.entry_price - exit_price)
@@ -294,15 +306,15 @@ def _email_close(pos: Position, event: str, exit_price: float) -> tuple[str, str
     sign     = "+" if pnl_pips >= 0 else ""
     subject  = (
         f"[{pos.pair.upper()}] {pos.direction} Closed — "
-        f"{result} {sign}{pnl_pips:.1f} pips"
+        f"{result} {sign}{pnl_pips:.1f} {unit}"
     )
     body = "\n".join([
         f"Trade Closed : {pos.pair.upper()} {pos.direction}",
         f"Exit Reason  : {reason} Hit",
         "",
-        f"Entry        : {pos.entry_price:.5f}",
-        f"Exit         : {exit_price:.5f}",
-        f"P&L          : {sign}{pnl_pips:.1f} pips",
+        f"Entry        : {pos.entry_price:{pfmt}}",
+        f"Exit         : {exit_price:{pfmt}}",
+        f"P&L          : {sign}{pnl_pips:.1f} {unit}",
         f"Result       : {result}",
     ])
     return subject, body

@@ -133,6 +133,9 @@ H1_MACD_SLOW   = 26
 H1_MACD_SIGNAL = 9
 H1_RSI_PERIOD  = 14
 
+# 4h trend filter (Measure 4)
+H4_EMA_PERIOD = 22
+
 # 5m entry
 M5_EMA_FAST      = 8
 M5_EMA_SLOW      = 21
@@ -295,16 +298,21 @@ def compute_m5_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def assess_h1_bias(df: pd.DataFrame) -> dict:
+def assess_h1_bias(df: pd.DataFrame, df_4h: Optional[pd.DataFrame] = None) -> dict:
     """
-    Evaluate the three trend gates on the last completed 1h bar and return
+    Evaluate the trend gates on the last completed 1h bar and return
     the directional bias together with the raw indicator values.
 
     Uses iloc[-1] (the current forming bar) so the bias reflects live price action.
     Returns direction "FLAT" unless all three gates pass simultaneously:
         1. Price side of EMA50
-        2. MACD histogram positive/negative AND building vs previous bar
+        2. MACD histogram positive/negative
         3. RSI(14) above/below 50
+
+    Measure 4 — 4h agreement gate (optional):
+        If df_4h is provided, the 4h close must be on the same side of the
+        4h EMA50 as the 1h direction. Trades where 1h and 4h conflict are
+        suppressed as FLAT.
 
     Returns a dict with keys:
         direction  — "BUY", "SELL", or "FLAT"
@@ -333,6 +341,14 @@ def assess_h1_bias(df: pd.DataFrame) -> dict:
         direction = "SELL"
     else:
         direction = "FLAT"
+
+    if direction != "FLAT" and df_4h is not None and len(df_4h) > 0:
+        bar_4h   = df_4h.iloc[-1]
+        h4_above = float(bar_4h["close"]) > float(bar_4h["ema_4h"])
+        if direction == "BUY" and not h4_above:
+            direction = "FLAT"
+        elif direction == "SELL" and h4_above:
+            direction = "FLAT"
 
     return {
         "direction":  direction,
@@ -615,10 +631,10 @@ def run(symbol: str = SYMBOL) -> Signal:
         "close": "last", "volume": "sum",
     }).dropna()
     df_4h = compute_h1_indicators(df_4h)
+    df_4h["ema_4h"] = EMAIndicator(close=df_4h["close"], window=H4_EMA_PERIOD).ema_indicator()
     df_5m = compute_m5_indicators(df_5m)
 
-    h1_bias = assess_h1_bias(df_4h)
-    h1_bias["atr"] = float(df_1h_ind.iloc[-1]["atr"])
+    h1_bias = assess_h1_bias(df_1h_ind, df_4h=df_4h)
     entry   = find_m5_entry(df_5m, h1_bias["direction"])
     signal  = build_signal(h1_bias, entry, symbol)
 

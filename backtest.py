@@ -56,9 +56,11 @@ Usage
 """
 
 import argparse
+from typing import Optional
 
 import pandas as pd
 import yfinance as yf
+from ta.trend import EMAIndicator
 from rich.console import Console
 from rich.table import Table
 from rich import box
@@ -67,12 +69,14 @@ import indicator_eurusd
 import indicator_gbpusd
 import indicator_usdjpy
 import indicator_audusd
+import indicator_btcusd
 
 PAIRS: dict[str, str] = {
     "eurusd": "EURUSD=X",
     "gbpusd": "GBPUSD=X",
     "usdjpy": "USDJPY=X",
     "audusd": "AUDUSD=X",
+    "btcusd": "BTC-USD",
 }
 
 PAIR_INDICATORS = {
@@ -80,11 +84,13 @@ PAIR_INDICATORS = {
     "gbpusd": indicator_gbpusd,
     "usdjpy": indicator_usdjpy,
     "audusd": indicator_audusd,
+    "btcusd": indicator_btcusd,
 }
 
 # ── Per-pair spread defaults ──────────────────────────────────────────────────
 # spread_scalp: typical spread in pips for 5m scalp mode
 # spread_long:  slightly tighter spread assumed for 1h long mode
+# use_session:  False for 24/7 instruments like BTC
 PAIR_CONFIG: dict[str, dict] = {
     "eurusd": {"spread_scalp": 1.5, "spread_long": 1.0},
     "gbpusd": {"spread_scalp": 1.8, "spread_long": 1.2},
@@ -94,6 +100,8 @@ PAIR_CONFIG: dict[str, dict] = {
     "usdchf": {"spread_scalp": 2.0, "spread_long": 1.5},
     "nzdusd": {"spread_scalp": 2.5, "spread_long": 2.0},
     "eurgbp": {"spread_scalp": 1.5, "spread_long": 1.0},
+    # BTC: spread in dollars (pip_value=1.0); no session gate
+    "btcusd": {"spread_scalp": 20, "spread_long": 15, "use_session": False},
 }
 
 console = Console()
@@ -151,19 +159,26 @@ def merge_trend(df_h1: pd.DataFrame, df_5m: pd.DataFrame) -> pd.DataFrame:
     return merged
 
 
-def fetch_data(symbol: str, ind) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Scalp mode: 1h trend + 5m entry bars (~60 days)."""
+def fetch_data(symbol: str, ind) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Scalp mode: 1h trend + 4h filter (Measure 4) + 5m entry bars (~60 days)."""
     df_h1 = yf.download(symbol, interval="1h", period="60d", progress=False, auto_adjust=True)
     df_h1 = flatten_columns(df_h1)
     df_h1.dropna(inplace=True)
     df_h1 = ind.compute_h1_indicators(df_h1)
+
+    df_4h = df_h1.resample("4h").agg({
+        "open": "first", "high": "max", "low": "min",
+        "close": "last", "volume": "sum",
+    }).dropna()
+    df_4h = ind.compute_h1_indicators(df_4h)
+    df_4h["ema_4h"] = EMAIndicator(close=df_4h["close"], window=ind.H4_EMA_PERIOD).ema_indicator()
 
     df_5m = yf.download(symbol, interval="5m", period="60d", progress=False, auto_adjust=True)
     df_5m = flatten_columns(df_5m)
     df_5m.dropna(inplace=True)
     df_5m = ind.compute_m5_indicators(df_5m)
 
-    return df_h1, df_5m
+    return df_h1, df_4h, df_5m
 
 
 def fetch_data_long(symbol: str, ind) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -186,7 +201,7 @@ def fetch_data_long(symbol: str, ind) -> tuple[pd.DataFrame, pd.DataFrame]:
 def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
                  bar_mins: int = 5, spread_pips: float = SPREAD_PIPS,
                  use_session: bool = True, symbol: str = "EURUSD=X",
-                 ind=None) -> list[dict]:
+                 ind=None, df_4h: Optional[pd.DataFrame] = None) -> list[dict]:
     """
     Walk forward through the merged entry bars, simulating trades.
 
@@ -212,6 +227,12 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
     df_h1 = df_h1.copy()
     df_h1.index = _to_utc(df_h1.index)
     h1_times = df_h1.index
+
+    # Normalise 4h index for Measure 4 slicing (None = gate disabled)
+    if df_4h is not None:
+        df_4h = df_4h.copy()
+        df_4h.index = _to_utc(df_4h.index)
+    h4_times = df_4h.index if df_4h is not None else None
 
     pv = ind.pip_value(symbol)
 
@@ -289,7 +310,11 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
         h1_end = h1_times.searchsorted(ts, side="right")
         if h1_end < 3:
             continue
-        bias_info = ind.assess_h1_bias(df_h1.iloc[:h1_end])
+        df_4h_slice = None
+        if h4_times is not None:
+            h4_end      = h4_times.searchsorted(ts, side="right")
+            df_4h_slice = df_4h.iloc[:h4_end] if h4_end > 0 else None
+        bias_info = ind.assess_h1_bias(df_h1.iloc[:h1_end], df_4h=df_4h_slice)
         bias = bias_info["direction"]
         if bias == "FLAT":
             continue
@@ -348,13 +373,51 @@ def _compute_stats(trades: list[dict], bar_mins: int) -> dict:
     )
 
 
-def report(trades: list[dict], bar_mins: int = 5, pair_label: str = "EURUSD") -> None:
+def _compute_sizing(trades: list[dict], pair: str, account: float, risk_pct: float) -> tuple[list[float], str]:
+    """
+    Return per-trade position sizes and the unit label ("BTC" or "lots").
+
+    Sizing formula: size = risk_dollars / stop_dollars_per_unit
+      BTC      : stop is already in USD, so size = risk / stop_dist  (BTC)
+      JPY pairs: quote is JPY, so stop_dist / entry converts to USD per unit
+                 lots = risk * entry / (stop_dist * 100_000)
+      USD pairs: quote is USD, lots = risk / (stop_dist * 100_000)
+    """
+    risk_dollars = account * risk_pct / 100
+    LOT_SIZE     = 100_000
+    is_btc = "BTC" in pair.upper()
+    is_jpy = "JPY" in pair.upper()
+
+    sizes = []
+    for t in trades:
+        stop_dist = abs(t["entry"] - t["sl"])
+        if stop_dist == 0:
+            sizes.append(0.0)
+            continue
+        if is_btc:
+            sizes.append(risk_dollars / stop_dist)
+        elif is_jpy:
+            sizes.append(risk_dollars * t["entry"] / (stop_dist * LOT_SIZE))
+        else:
+            sizes.append(risk_dollars / (stop_dist * LOT_SIZE))
+
+    unit = "BTC" if is_btc else "lots"
+    return sizes, unit
+
+
+def report(trades: list[dict], bar_mins: int = 5, pair_label: str = "EURUSD",
+           account: float = 10_000, risk_pct: float = 1.0) -> None:
     """Print a summary table and save the full trade log to CSV."""
     if not trades:
         console.print("[yellow]No trades generated.[/]")
         return
 
     s = _compute_stats(trades, bar_mins)
+    sizes, size_unit = _compute_sizing(trades, pair_label, account, risk_pct)
+    avg_size = sum(sizes) / len(sizes) if sizes else 0.0
+    min_size = min(sizes) if sizes else 0.0
+    max_size = max(sizes) if sizes else 0.0
+    size_fmt = ".4f" if size_unit == "BTC" else ".2f"
 
     if bar_mins >= 60:
         hold_str   = f"{s['avg_mins'] / 60:.1f} hrs"
@@ -383,11 +446,21 @@ def report(trades: list[dict], bar_mins: int = 5, pair_label: str = "EURUSD") ->
     table.add_row("Max drawdown",  f"[red]{s['max_dd']:.1f} pips[/]")
     table.add_row("Avg hold time", hold_str)
     table.add_row("Forced closes", str(s["forced"]))
+    table.add_row("──────────────", "──────────────")
+    table.add_row("Account / risk",
+                  f"${account:,.0f}  ·  {risk_pct:.1f}%  =  ${account * risk_pct / 100:.0f}/trade")
+    table.add_row(f"Avg size",
+                  f"{avg_size:{size_fmt}} {size_unit}")
+    table.add_row(f"Size range",
+                  f"{min_size:{size_fmt}} – {max_size:{size_fmt}} {size_unit}")
 
     console.print(table)
 
+    df = pd.DataFrame(trades)
+    df["suggested_size"] = sizes
+    df["size_unit"]      = size_unit
     csv_path = f"{pair_label.lower()}_backtest_trades.csv"
-    pd.DataFrame(trades).to_csv(csv_path, index=False)
+    df.to_csv(csv_path, index=False)
     console.print(f"\n[dim]Full trade log saved to {csv_path}[/]")
 
 
@@ -442,6 +515,10 @@ if __name__ == "__main__":
     )
     parser.add_argument("--all", action="store_true",
                         help="Run every pair and show a combined comparison table")
+    parser.add_argument("--account", type=float, default=10_000,
+                        help="Account size in USD for position sizing (default: 10000)")
+    parser.add_argument("--risk", type=float, default=1.0,
+                        help="Risk per trade as %% of account (default: 1.0)")
     args = parser.parse_args()
 
     if args.all:
@@ -455,18 +532,21 @@ if __name__ == "__main__":
             cfg        = PAIR_CONFIG[pair_key]
             ind        = PAIR_INDICATORS[pair_key]
             console.print(f"  [dim]Fetching {pair_label}...[/]")
+            use_sess = cfg.get("use_session", True)
             if args.long:
                 df_trend, df_entry = fetch_data_long(symbol, ind)
                 trades = run_backtest(df_trend, df_entry, bar_mins=60,
                                       spread_pips=cfg["spread_long"], use_session=False,
                                       symbol=symbol, ind=ind)
-                report(trades, bar_mins=60, pair_label=pair_label)
+                report(trades, bar_mins=60, pair_label=pair_label,
+                       account=args.account, risk_pct=args.risk)
             else:
-                df_trend, df_entry = fetch_data(symbol, ind)
+                df_trend, df_4h, df_entry = fetch_data(symbol, ind)
                 trades = run_backtest(df_trend, df_entry, bar_mins=5,
-                                      spread_pips=cfg["spread_scalp"], use_session=True,
-                                      symbol=symbol, ind=ind)
-                report(trades, bar_mins=5, pair_label=pair_label)
+                                      spread_pips=cfg["spread_scalp"], use_session=use_sess,
+                                      symbol=symbol, ind=ind, df_4h=df_4h)
+                report(trades, bar_mins=5, pair_label=pair_label,
+                       account=args.account, risk_pct=args.risk)
             all_results.append((pair_label, trades))
         report_all(all_results, bar_mins=bar_mins)
     else:
@@ -475,17 +555,20 @@ if __name__ == "__main__":
         cfg        = PAIR_CONFIG[args.pair]
         ind        = PAIR_INDICATORS[args.pair]
 
+        use_sess = cfg.get("use_session", True)
         if args.long:
             console.print(f"[bold cyan]Running {pair_label} Scalper backtest (long mode · 730d · 1h bars)...[/]")
             df_trend, df_entry = fetch_data_long(symbol, ind)
             trades = run_backtest(df_trend, df_entry, bar_mins=60,
                                   spread_pips=cfg["spread_long"], use_session=False,
                                   symbol=symbol, ind=ind)
-            report(trades, bar_mins=60, pair_label=pair_label)
+            report(trades, bar_mins=60, pair_label=pair_label,
+                   account=args.account, risk_pct=args.risk)
         else:
             console.print(f"[bold cyan]Running {pair_label} Scalper backtest (scalp mode · 60d · 5m bars)...[/]")
-            df_trend, df_entry = fetch_data(symbol, ind)
+            df_trend, df_4h, df_entry = fetch_data(symbol, ind)
             trades = run_backtest(df_trend, df_entry, bar_mins=5,
-                                  spread_pips=cfg["spread_scalp"], use_session=True,
-                                  symbol=symbol, ind=ind)
-            report(trades, bar_mins=5, pair_label=pair_label)
+                                  spread_pips=cfg["spread_scalp"], use_session=use_sess,
+                                  symbol=symbol, ind=ind, df_4h=df_4h)
+            report(trades, bar_mins=5, pair_label=pair_label,
+                   account=args.account, risk_pct=args.risk)
