@@ -91,10 +91,9 @@ Trailing stop — two phases:
 Cooldown:    No new entry for 30 minutes (6 × 5m bars) after a loss.
 """
 
-import json
 import logging
 from datetime import datetime, timezone
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
@@ -672,12 +671,6 @@ def display_signal(signal: Signal, symbol: str = SYMBOL) -> None:
     console.print(Panel(table, title=f"[bold]{pair_label} Scalper Signal[/]", border_style="cyan"))
 
 
-def save_signal(signal: Signal, path: str = "signals.jsonl") -> None:
-    """Append the signal as a JSON line to the log file."""
-    with open(path, "a") as f:
-        f.write(json.dumps(asdict(signal)) + "\n")
-
-
 if __name__ == "__main__":
     import argparse as _argparse
 
@@ -707,6 +700,3 @@ if __name__ == "__main__":
         if _args.quiet and signal.direction == "FLAT":
             continue
         display_signal(signal, _symbol)
-        save_signal(signal)
-
-    console.print("\n[dim]Signal(s) appended to signals.jsonl[/]")

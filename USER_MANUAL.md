@@ -2,11 +2,11 @@
 
 ## Overview
 
-This tool generates intraday scalping signals for major FX pairs using a
-two-timeframe approach: the **1h chart** sets the directional bias, and the
-**5m chart** finds precise entry timing within that bias.  It can be used
-interactively (one-shot signal checks) or as a long-running daemon that sends
-email alerts.
+This tool generates intraday scalping signals for major FX pairs and BTCUSD
+using a two-timeframe approach: the **1h chart** sets the directional bias,
+and the **5m chart** finds precise entry timing within that bias.  It can be
+used interactively (one-shot signal checks) or as a long-running daemon that
+sends email alerts. The crypto daemon also places orders directly on Binance.
 
 ---
 
@@ -24,6 +24,7 @@ pip install -r requirements.txt
 # 3. Configure email (optional — required for daemon alerts)
 cp .env.example .env
 # edit .env with your SMTP credentials
+# for the crypto daemon also add BINANCE_API_KEY, BINANCE_API_SECRET, etc.
 ```
 
 ---
@@ -36,11 +37,14 @@ immediate signal.
 ### Basic usage
 
 ```bash
-# Signal for a specific pair
+# FX pairs
 python indicator_eurusd.py
 python indicator_gbpusd.py
 python indicator_usdjpy.py
 python indicator_audusd.py
+
+# BTCUSD
+python indicator_btcusd.py
 
 # Suppress FLAT (no-signal) output
 python indicator_eurusd.py --quiet
@@ -54,10 +58,11 @@ python indicator_eurusd.py --quiet
 | `indicator_gbpusd.py` | Cable — British Pound / US Dollar | `GBPUSD=X` |
 | `indicator_usdjpy.py` | US Dollar / Japanese Yen | `USDJPY=X` |
 | `indicator_audusd.py` | Australian Dollar / US Dollar | `AUDUSD=X` |
+| `indicator_btcusd.py` | Bitcoin / US Dollar | `BTC-USD` |
 
 Each file contains its own tunable parameter block at the top. Changing
-values there affects only that pair — `daemon.py` and `backtest.py`
-both dispatch to the correct file automatically.
+values there affects only that pair — `daemon_fx.py`, `daemon_crypto.py`, and
+`backtest.py` all dispatch to the correct file automatically.
 
 ### Output
 
@@ -67,50 +72,58 @@ Each signal panel shows:
 |--------------|-----------------------------------------------------|
 | Direction    | **BUY**, **SELL**, or **FLAT** (no signal)          |
 | Entry        | Suggested entry price                               |
-| Stop Loss    | Hard stop (ATR × 0.4 from entry)                   |
+| Stop Loss    | Hard stop (ATR × 0.4 for patterns A/C; clamped pullback extreme for D) |
 | Take Profit  | Wide ceiling (ATR × 3.0 from entry)                |
 | R:R          | Risk-to-reward ratio                                |
 | ATR(14) 1h   | 1h Average True Range — volatility measure         |
 | 1h Trend     | Price position relative to EMA50                   |
 | 1h RSI       | 1h RSI(14) — momentum gate                         |
 | MACD Hist    | 1h MACD histogram — momentum direction             |
-| Basis        | Which pattern fired and on which 5m bar            |
+| Basis        | Which pattern fired and on which bar               |
 
 All signals are appended to `signals.jsonl` in the current directory.  The
-daemon additionally writes every OPEN / BE / CLOSE event to `trades.jsonl`.
+daemons additionally write every OPEN / BE / CLOSE event to their trade logs
+(`fx_trades.jsonl` / `crypto_trades.jsonl`).
 
 ### Signal logic summary
 
 **Trend gates (1h — all three must pass):**
-1. Price above/below EMA50
-2. MACD histogram positive/negative **and** building (larger than previous bar)
+1. Price above/below EMA(50)
+2. MACD histogram positive (BUY) or negative (SELL)
 3. RSI(14) above 50 for BUY, below 50 for SELL
 
-**Entry patterns (5m — first match wins):**
-- **Pattern A** — EMA8 crosses EMA21 in trend direction, confirmed by RSI(7) and Stochastic
-- **Pattern C** — MACD histogram flips sign in trend direction while price is on the right side of EMA21
+**4h agreement gate (Measure 4):**
+- 4h close must also be above/below the **4h EMA(22)** in the same direction as the 1h bias
+- Trades where 1h and 4h conflict are suppressed as FLAT
 
-**Session filter:** entries only fire during **07:00–16:00 UTC** (London / NY overlap)
+**Entry patterns (5m — first match wins):**
+- **Pattern A** — EMA(8) crosses EMA(21) in trend direction, confirmed by RSI(7) and Stochastic
+- **Pattern C** — 5m MACD histogram flips sign in trend direction while price is on the right side of EMA(21)
+- **Pattern D** — 3 same-colour Heikin-Ashi candles → 1 opposing pullback candle → resumption in trend direction; stop anchored to pullback extreme
+
+**Session filter:** FX entries only fire during **07:00–16:00 UTC** (London / NY overlap). BTCUSD has no session filter (24/7 market).
 
 **Risk management:**
-- Stop loss: ATR × 0.4 (~4–8 pips)
+- Stop loss (A/C): ATR × 0.4 (~4–8 pips for FX; ~$200–800 for BTC via ATR scaling)
+- Stop loss (D): pullback candle extreme ± buffer, clamped to `HA_SL_MIN_PIPS`–`HA_SL_MAX_PIPS`
 - Take profit: ATR × 3.0 (wide ceiling)
-- Stop moves to **breakeven** once price reaches 80 % of TP distance
+- **Breakeven move:** stop moves to entry once price reaches a fraction of the TP distance (70% for EURUSD, 80% for all other pairs)
 - **Cooldown:** no new entry for 30 minutes after a loss
 
 ---
 
-## Daemon Mode (`daemon.py`)
+## FX Daemon (`daemon_fx.py`)
 
-Runs indefinitely, polling every 5 minutes (configurable), and sends email
-alerts when a trade opens, the stop moves to breakeven, or the trade closes.
+Monitors EURUSD, GBPUSD, USDJPY, and AUDUSD indefinitely, polling every 5
+minutes (configurable), and sends email alerts when a trade opens, the stop
+moves to breakeven, or the trade closes.
 
 ### Email alerts
 
 | Event      | Sent when …                                        |
 |------------|----------------------------------------------------|
 | **OPEN**   | A BUY or SELL signal fires on a watched pair       |
-| **BE**     | Price reaches 80 % of TP — stop moved to entry     |
+| **BE**     | Price reaches the breakeven trigger — stop moved to entry |
 | **CLOSE**  | Stop loss or take profit is hit                    |
 
 No email is sent for FLAT bars or while a position is already open.
@@ -144,34 +157,35 @@ No email is sent for FLAT bars or while a position is already open.
 ### Trade log and restart persistence
 
 The daemon writes every OPEN, BE, and CLOSE event as a JSON line to
-`trades.jsonl` in the working directory.  On startup it replays this file to
-restore any open positions and the month-to-date pip total, so you can stop
-and restart the daemon without losing trade state.
+`fx_trades.jsonl` (mapped to `trades.jsonl` inside the container) in the
+working directory.  On startup it replays this file to restore any open
+positions and the month-to-date pip total, so you can stop and restart the
+daemon without losing trade state.
 
-Mount `trades.jsonl` as a Docker volume (or keep it alongside the process) to
-ensure persistence across container restarts.
+Mount `fx_trades.jsonl` as a Docker volume to ensure persistence across
+container restarts.
 
 ### Starting the daemon
 
 ```bash
-# Watch all 4 active pairs (default), poll every 5 minutes
-python daemon.py
+# Watch all 4 FX pairs (default), poll every 5 minutes
+python daemon_fx.py
 
 # Watch a single pair
-python daemon.py --pair usdjpy
+python daemon_fx.py --pair usdjpy
 
 # Custom poll interval (seconds)
-python daemon.py --interval 60
+python daemon_fx.py --interval 60
 
 # Test without sending emails — events are logged to stdout instead
-python daemon.py --dry-run
+python daemon_fx.py --dry-run
 ```
 
 ### Running in the background (macOS / Linux)
 
 ```bash
 # Start in background, append output to a log file
-nohup python daemon.py >> fxtrader.log 2>&1 &
+nohup python daemon_fx.py >> fxtrader.log 2>&1 &
 
 # Save the PID so you can stop it later
 echo $! > fxtrader.pid
@@ -201,7 +215,7 @@ Create `~/Library/LaunchAgents/com.fxtrader.daemon.plist`:
   <key>ProgramArguments</key>
   <array>
     <string>/Users/YOUR_NAME/Downloads/fxtrader/.venv/bin/python</string>
-    <string>/Users/YOUR_NAME/Downloads/fxtrader/daemon.py</string>
+    <string>/Users/YOUR_NAME/Downloads/fxtrader/daemon_fx.py</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/YOUR_NAME/Downloads/fxtrader</string>
@@ -226,7 +240,7 @@ launchctl load ~/Library/LaunchAgents/com.fxtrader.daemon.plist
 launchctl unload ~/Library/LaunchAgents/com.fxtrader.daemon.plist
 ```
 
-### Daemon output explained
+### FX daemon output explained
 
 ```
 2026-04-11 09:15:02  INFO     Initial fetch for EURUSD=X …
@@ -234,6 +248,45 @@ launchctl unload ~/Library/LaunchAgents/com.fxtrader.daemon.plist
 2026-04-11 09:15:09  INFO     EURUSD  OPEN BUY @ 1.08542  SL=1.08490  TP=1.08698  (5.2/15.6 pips  R:R 1:3.00)
 2026-04-11 09:20:04  INFO     EURUSD  BE triggered — SL moved to 1.08542
 2026-04-11 09:35:10  INFO     EURUSD  CLOSE BUY — close_tp @ 1.08698  P&L 15.6 pips
+```
+
+---
+
+## Crypto Daemon (`daemon_crypto.py`)
+
+Monitors BTCUSD continuously, places orders on Binance (via OCO), and sends
+email alerts on OPEN / BE / CLOSE events. All money amounts are in USD
+(one "pip" = $1.00 for BTC).
+
+### Additional .env variables
+
+```
+BINANCE_API_KEY=...
+BINANCE_API_SECRET=...
+BINANCE_TESTNET=false          # true = paper-trade on Binance testnet
+CRYPTO_RISK_USD=50             # max risk per trade in USD
+CRYPTO_TRADE_SIZE_USD=1000     # max notional per trade in USD
+```
+
+### Starting the crypto daemon
+
+```bash
+# Monitor BTCUSD, poll every 5 minutes
+python daemon_crypto.py
+
+# Shorter poll interval
+python daemon_crypto.py --interval 60
+
+# Dry-run — log events, do not send emails or place Binance orders
+python daemon_crypto.py --dry-run
+```
+
+### Running in the background
+
+```bash
+nohup python daemon_crypto.py >> cryptotrader.log 2>&1 &
+echo $! > cryptotrader.pid
+kill $(cat cryptotrader.pid)
 ```
 
 ---
@@ -251,11 +304,17 @@ python backtest.py --pair eurusd
 # Long mode — 730 days, 1h entry bars (larger sample)
 python backtest.py --pair eurusd --long
 
-# All 4 pairs, scalp mode — prints a combined summary table
+# BTCUSD
+python backtest.py --pair btcusd
+
+# All pairs, scalp mode — prints a combined summary table
 python backtest.py --all
 
-# All 4 pairs, long mode
+# All pairs, long mode
 python backtest.py --all --long
+
+# Include position sizing (requires account size and risk %)
+python backtest.py --pair eurusd --account 10000 --risk 1.0
 ```
 
 Results are printed as a table and saved to `{pair}_backtest_trades.csv`.
@@ -279,15 +338,21 @@ suitable as a primary feed for live order execution.
 ## Troubleshooting
 
 **No signal generated**
-- The 1h bias may be FLAT — all three trend gates must align simultaneously.
-- The session filter blocks entries outside 07:00–16:00 UTC.
-- ATR may be below the 2-pip floor (market too quiet).
+- The 1h bias may be FLAT — all three 1h gates must align simultaneously.
+- The 4h EMA(22) gate may be blocking — the 4h direction must agree with the 1h direction.
+- The session filter blocks FX entries outside 07:00–16:00 UTC.
+- ATR may be below the floor (2-pip / $50 BTC minimum — market too quiet).
 
 **Emails not arriving**
 - Run with `--dry-run` first to confirm signals are firing.
 - Check the log for `SMTP authentication failed` or `Failed to send email`.
 - Gmail users: ensure you are using an App Password, not your account password.
 - Check your spam folder.
+
+**Binance orders not placed (crypto daemon)**
+- Confirm `BINANCE_API_KEY` and `BINANCE_API_SECRET` are set in `.env`.
+- Check `BINANCE_TESTNET` — if `true`, orders go to the testnet (paper trading only).
+- Run `--dry-run` to verify signal logic without touching Binance.
 
 **`RuntimeError: No data returned`**
 - Yahoo Finance occasionally rate-limits or returns empty responses.

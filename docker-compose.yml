@@ -1,11 +1,25 @@
 services:
   fxtrader:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.fx
     env_file: .env
     restart: unless-stopped
     volumes:
       - ./signals.jsonl:/app/signals.jsonl
-      - ./trades.jsonl:/app/trades.jsonl
+      - ./fx_trades.jsonl:/app/trades.jsonl
     # Override CMD to pass flags, e.g.:
     #   command: ["--dry-run"]
     #   command: ["--pair", "eurusd", "--interval", "60"]
+
+  cryptotrader:
+    build:
+      context: .
+      dockerfile: Dockerfile.crypto
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - ./crypto_trades.jsonl:/app/trades.jsonl
+    # Override CMD to pass flags, e.g.:
+    #   command: ["--dry-run"]
+    #   command: ["--interval", "60"]
