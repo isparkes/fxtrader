@@ -14,6 +14,7 @@ against historical data via the walk-forward backtest.
 | `indicator_usdjpy.py` | Signal logic and parameters for USDJPY |
 | `indicator_audusd.py` | Signal logic and parameters for AUDUSD |
 | `indicator_btcusd.py` | Signal logic and parameters for BTCUSD (pip = $1) |
+| `oanda.py` | Oanda REST API v20 wrapper — account summary, live pricing, order execution, and candle data |
 | `daemon_fx.py` | Long-running daemon for FX pairs — polls, manages positions, sends email alerts |
 | `daemon_crypto.py` | Long-running daemon for BTCUSD — as above, plus Binance order execution |
 | `mailer.py` | SMTP email helper used by both daemons |
@@ -28,12 +29,12 @@ against historical data via the walk-forward backtest.
 
 ### FX (daemon_fx.py)
 
-| Indicator file | Pair | Yahoo symbol |
-|---|---|---|
-| `indicator_eurusd.py` | Euro / US Dollar | `EURUSD=X` |
-| `indicator_gbpusd.py` | Cable — British Pound / US Dollar | `GBPUSD=X` |
-| `indicator_usdjpy.py` | US Dollar / Japanese Yen | `USDJPY=X` |
-| `indicator_audusd.py` | Australian Dollar / US Dollar | `AUDUSD=X` |
+| Indicator file | Pair | Yahoo symbol | Oanda instrument |
+|---|---|---|---|
+| `indicator_eurusd.py` | Euro / US Dollar | `EURUSD=X` | `EUR_USD` |
+| `indicator_gbpusd.py` | Cable — British Pound / US Dollar | `GBPUSD=X` | `GBP_USD` |
+| `indicator_usdjpy.py` | US Dollar / Japanese Yen | `USDJPY=X` | `USD_JPY` |
+| `indicator_audusd.py` | Australian Dollar / US Dollar | `AUDUSD=X` | `AUD_USD` |
 
 ### Crypto (daemon_crypto.py)
 
@@ -73,6 +74,16 @@ python backtest.py --all
 Create a `.env` file with your email credentials (see `mailer.py` for the
 required variables). The file is **not** baked into the image — it is passed
 at runtime via `--env-file` in `docker run` or via `env_file:` in Compose.
+
+For the FX daemon with Oanda integration (live orders or Oanda price feed) also add:
+```
+OANDA_API_KEY=...              # personal access token from Oanda
+OANDA_ACCOUNT_ID=...           # numeric account ID from the Oanda hub
+OANDA_ENV=practice             # "practice" (demo) or "live"
+OANDA_RISK_PCT=0.01            # fraction of balance to risk per trade (default 1 %)
+FX_DATA_SOURCE=yfinance        # "yfinance" (default) or "oanda" for price/candle data
+FX_LIVE=false                  # true = place live Oanda market orders on every signal
+```
 
 For the crypto daemon also add:
 ```
@@ -168,7 +179,8 @@ docker run -d \
 |---|---|---|
 | `--pair <name>` | all FX pairs | Monitor a single pair (e.g. `eurusd`) |
 | `--interval <seconds>` | `300` | Poll interval in seconds |
-| `--dry-run` | off | Log events but do not send emails |
+| `--live` | off | Enable live Oanda order execution (requires `OANDA_API_KEY` / `OANDA_ACCOUNT_ID`) |
+| `--dry-run` | off | Log events but do not send emails or place orders |
 
 **daemon_crypto.py**
 
@@ -270,6 +282,18 @@ guards — the HA sequence itself provides the quality filter.
 | Trailing stop — phase 1 | Move to entry (breakeven) | EURUSD: triggered at 70% of TP; others: 80% |
 | Trailing stop — phase 2 | Trail ATR × 0.4 behind best price | Runs from breakeven; exits when momentum exhausts |
 | Cooldown after loss | 6 bars (30 min in scalp mode) | Prevents revenge trading |
+| Spread guard | Block entry if live spread > 2× standard | Queried from Oanda at signal time; guards against news spikes and thin liquidity |
+
+Standard spreads used by the guard (pip thresholds at 2× these values trigger rejection):
+
+| Pair | Standard spread | Block threshold |
+|---|---|---|
+| EURUSD | 1.0 pip | > 2.0 pips |
+| GBPUSD | 1.5 pips | > 3.0 pips |
+| USDJPY | 2.0 pips | > 4.0 pips |
+| AUDUSD | 1.5 pips | > 3.0 pips |
+
+If the Oanda price check fails (network error), the guard fails open and the entry is allowed. The rejection is logged at INFO level as `<PAIR> <DIRECTION> signal skipped — spread X.X pips exceeds Y.Y pip threshold`.
 
 ### Indicator parameters
 

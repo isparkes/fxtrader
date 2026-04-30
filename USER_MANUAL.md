@@ -109,6 +109,7 @@ daemons additionally write every OPEN / BE / CLOSE event to their trade logs
 - Take profit: ATR × 3.0 (wide ceiling)
 - **Breakeven move:** stop moves to entry once price reaches a fraction of the TP distance (70% for EURUSD, 80% for all other pairs)
 - **Cooldown:** no new entry for 30 minutes after a loss
+- **Spread guard:** before every entry the daemon queries the live Oanda bid/ask spread; if it exceeds 2× the pair's standard spread the signal is skipped and logged. Protects against news events and thin-liquidity sessions.
 
 ---
 
@@ -153,6 +154,21 @@ No email is sent for FLAT bars or while a position is already open.
    ```
    MAIL_TO=trader@example.com,alerts@example.com
    ```
+
+### Oanda integration
+
+The FX daemon uses Oanda for three things: live position sizing (account balance), spread checking before every entry, and order execution in live mode. Add the following to `.env`:
+
+```
+OANDA_API_KEY=...              # personal access token from the Oanda hub
+OANDA_ACCOUNT_ID=...           # numeric account ID
+OANDA_ENV=practice             # "practice" (demo) or "live"
+OANDA_RISK_PCT=0.01            # fraction of balance to risk per trade
+FX_DATA_SOURCE=yfinance        # "yfinance" (default) or "oanda" to use Oanda as the candle feed
+FX_LIVE=false                  # true = place live Oanda market orders
+```
+
+Set `FX_DATA_SOURCE=oanda` to fetch all OHLCV candles from Oanda instead of Yahoo Finance. This gives institutional-quality tick data and removes the dependency on Yahoo's public API.
 
 ### Trade log and restart persistence
 
@@ -329,9 +345,15 @@ Results are printed as a table and saved to `{pair}_backtest_trades.csv`.
 | Daemon (startup) | 7 d       | 2 d      | Compact initial seed              |
 | Daemon (running) | last 3 h  | last 15 m| Incremental — dedup & append      |
 
-All data comes from Yahoo Finance (`yfinance`) and is for indicative purposes
-only.  Yahoo Finance FX data may have gaps or slight inaccuracies; it is not
-suitable as a primary feed for live order execution.
+By default all OHLCV data comes from Yahoo Finance (`yfinance`). Set
+`FX_DATA_SOURCE=oanda` in `.env` to use the Oanda REST API instead — the
+daemon will fetch candles from `api-fxpractice.oanda.com` (or
+`api-fxtrade.oanda.com` when `OANDA_ENV=live`). Both sources produce the same
+DataFrame shape; the rest of the pipeline is unchanged.
+
+Yahoo Finance data is for indicative purposes only and may have gaps or slight
+inaccuracies. Oanda candle data is suitable as a feed alongside live order
+execution.
 
 ---
 
@@ -342,6 +364,7 @@ suitable as a primary feed for live order execution.
 - The 4h EMA(22) gate may be blocking — the 4h direction must agree with the 1h direction.
 - The session filter blocks FX entries outside 07:00–16:00 UTC.
 - ATR may be below the floor (2-pip / $50 BTC minimum — market too quiet).
+- The spread guard may have blocked the entry — check the log for `signal skipped — spread X.X pips exceeds Y.Y pip threshold`. This is expected during news releases (NFP, FOMC, CPI) and at session open/close when liquidity is thin.
 
 **Emails not arriving**
 - Run with `--dry-run` first to confirm signals are firing.

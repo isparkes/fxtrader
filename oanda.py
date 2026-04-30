@@ -14,6 +14,7 @@ Optional:
 """
 
 import os
+from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
@@ -186,6 +187,7 @@ def get_candles(
     pair: str,
     granularity: str = "M5",
     count: int = 200,
+    from_time: datetime | None = None,
 ) -> list[dict]:
     """
     Fetch completed mid-price OHLCV candles.
@@ -193,7 +195,8 @@ def get_candles(
     Args:
         pair:        internal key, e.g. "eurusd"
         granularity: Oanda string — "M5", "M15", "H1", "H4", "D", etc.
-        count:       number of candles (max 5000)
+        count:       number of candles (max 5000); ignored when from_time is set
+        from_time:   if given, fetch from this UTC datetime instead of using count
 
     Returns a list of dicts with keys: time, open, high, low, close, volume.
     Incomplete (still-forming) candles are excluded.
@@ -201,12 +204,12 @@ def get_candles(
     _require_config()
     instrument = INSTRUMENTS[pair.lower()]
     url = f"{_BASE_URL}/v3/instruments/{instrument}/candles"
-    resp = requests.get(
-        url,
-        headers=_headers(),
-        params={"granularity": granularity, "count": count, "price": "M"},
-        timeout=15,
-    )
+    params: dict = {"granularity": granularity, "price": "M"}
+    if from_time is not None:
+        params["from"] = from_time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    else:
+        params["count"] = count
+    resp = requests.get(url, headers=_headers(), params=params, timeout=15)
     resp.raise_for_status()
     return [
         {

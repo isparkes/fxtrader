@@ -87,7 +87,8 @@ import tradelog
 
 load_dotenv()
 
-OANDA_RISK_PCT = float(os.getenv("OANDA_RISK_PCT", "0.01"))
+OANDA_RISK_PCT  = float(os.getenv("OANDA_RISK_PCT", "0.01"))
+FX_DATA_SOURCE  = os.getenv("FX_DATA_SOURCE", "yfinance").lower()
 
 # logsetup.configure() is called in __main__ once the CLI args are parsed,
 # so that --log-level can override the LOG_LEVEL env var before any logging happens.
@@ -96,6 +97,17 @@ log = logging.getLogger("fxtrader.daemon")
 # ── Constants ─────────────────────────────────────────────────────────────────
 TRAIL_ACTIVATE_FRAC = 0.80   # mirrors backtest.py
 COOLDOWN_MINS       = 30     # post-loss lockout
+
+_GRANULARITY_MAP = {"1h": "H1", "5m": "M5"}  # yfinance → Oanda granularity strings
+
+# Typical spread for each pair during normal liquid hours (pips).
+# Entry is rejected when the live spread exceeds 2× this value.
+STANDARD_SPREADS: dict[str, float] = {
+    "eurusd": 1.0,
+    "gbpusd": 1.5,
+    "usdjpy": 2.0,
+    "audusd": 1.5,
+}
 
 # Minimum bars needed for indicator warmup:
 #   EMA50 → 50, MACD(12/26/9) → 26, RSI(14) → 14  → ~70 bars safe floor
@@ -171,6 +183,23 @@ def _fetch_raw(symbol: str, interval: str, **kwargs) -> pd.DataFrame:
     return df
 
 
+def _fetch_oanda(pair: str, granularity: str, count: int = 200,
+                 start: datetime | None = None) -> pd.DataFrame:
+    """Fetch OHLCV from Oanda and return a UTC-indexed DataFrame matching _fetch_raw output."""
+    candles = oanda.get_candles(
+        pair,
+        granularity=_GRANULARITY_MAP[granularity],
+        count=count,
+        from_time=start,
+    )
+    if not candles:
+        return pd.DataFrame()
+    df = pd.DataFrame(candles)
+    df.index = pd.to_datetime(df["time"], utc=True)
+    df.drop(columns=["time"], inplace=True)
+    return df[["open", "high", "low", "close", "volume"]]
+
+
 def _merge_into_cache(cached: pd.DataFrame, new: pd.DataFrame,
                       max_bars: int) -> pd.DataFrame:
     """Concatenate new bars onto cache, dedup by timestamp, trim to max_bars."""
@@ -180,18 +209,25 @@ def _merge_into_cache(cached: pd.DataFrame, new: pd.DataFrame,
     return combined.tail(max_bars)
 
 
-def refresh_data(symbol: str, state: PairState) -> PairState:
+def refresh_data(pair: str, symbol: str, state: PairState) -> PairState:
     """
     Update the in-memory OHLCV cache for `symbol`.
 
-    First call: compact initial fetch (7d of 1h, 2d of 5m).
-    Subsequent calls: fetch only the most recent bars starting just before
-    the last cached bar and merge — avoids re-downloading the full history.
+    First call: compact initial fetch (7d of 1h, 2d of 5m for yfinance;
+    H1_MAX_BARS / M5_MAX_BARS for Oanda).
+    Subsequent calls: fetch only the most recent bars and merge.
+    Data source is controlled by FX_DATA_SOURCE in .env.
     """
+    use_oanda = FX_DATA_SOURCE == "oanda"
+
     if state.cache_h1 is None:
-        log.info("Initial fetch for %s …", symbol)
-        state.cache_h1 = _fetch_raw(symbol, "1h", period="7d")
-        state.cache_5m = _fetch_raw(symbol, "5m", period="2d")
+        log.info("Initial fetch for %s via %s …", symbol, FX_DATA_SOURCE)
+        if use_oanda:
+            state.cache_h1 = _fetch_oanda(pair, "1h", count=H1_MAX_BARS)
+            state.cache_5m = _fetch_oanda(pair, "5m", count=M5_MAX_BARS)
+        else:
+            state.cache_h1 = _fetch_raw(symbol, "1h", period="7d")
+            state.cache_5m = _fetch_raw(symbol, "5m", period="2d")
         log.info(
             "%s  cache seeded: %d × 1h bars, %d × 5m bars",
             symbol, len(state.cache_h1), len(state.cache_5m),
@@ -202,8 +238,12 @@ def refresh_data(symbol: str, state: PairState) -> PairState:
     h1_start = (state.cache_h1.index[-1] - H1_LOOKBACK).to_pydatetime()
     m5_start = (state.cache_5m.index[-1] - M5_LOOKBACK).to_pydatetime()
 
-    new_h1 = _fetch_raw(symbol, "1h", start=h1_start)
-    new_5m = _fetch_raw(symbol, "5m", start=m5_start)
+    if use_oanda:
+        new_h1 = _fetch_oanda(pair, "1h", start=h1_start)
+        new_5m = _fetch_oanda(pair, "5m", start=m5_start)
+    else:
+        new_h1 = _fetch_raw(symbol, "1h", start=h1_start)
+        new_5m = _fetch_raw(symbol, "5m", start=m5_start)
 
     if not new_h1.empty:
         state.cache_h1 = _merge_into_cache(state.cache_h1, new_h1, H1_MAX_BARS)
@@ -211,6 +251,28 @@ def refresh_data(symbol: str, state: PairState) -> PairState:
         state.cache_5m = _merge_into_cache(state.cache_5m, new_5m, M5_MAX_BARS)
 
     return state
+
+
+# ── Spread guard ─────────────────────────────────────────────────────────────
+
+def _spread_ok(pair: str) -> tuple[bool, float]:
+    """
+    Return (ok, spread_pips).  ok is False when the live spread exceeds 2× the
+    standard spread for this pair (news events, thin liquidity).
+    Returns (True, 0.0) on any API error so transient hiccups don't block trades.
+    """
+    try:
+        price       = oanda.get_price(pair)
+        pv          = PAIR_INDICATORS[pair].pip_value(pair)
+        spread_pips = (price["ask"] - price["bid"]) / pv
+        threshold   = STANDARD_SPREADS[pair] * 2
+        ok          = spread_pips <= threshold
+        log.debug("%s  spread %.1f pips (threshold %.1f) — %s",
+                  pair.upper(), spread_pips, threshold, "OK" if ok else "BLOCKED")
+        return ok, spread_pips
+    except Exception as exc:
+        log.warning("%s  spread check failed (%s) — allowing entry", pair.upper(), exc)
+        return True, 0.0
 
 
 # ── Position management ───────────────────────────────────────────────────────
@@ -457,7 +519,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
     now = datetime.now(timezone.utc)
 
     try:
-        state = refresh_data(symbol, state)
+        state = refresh_data(pair, symbol, state)
     except Exception as exc:
         log.warning("%s  data refresh failed: %s", pair.upper(), exc)
         return state
@@ -556,6 +618,15 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
 
     signal = ind.build_signal(h1_bias, entry, symbol)
     if signal.direction == "FLAT":
+        return state
+
+    # ── Spread guard ──────────────────────────────────────────────────────────
+    spread_ok, spread_pips = _spread_ok(pair)
+    if not spread_ok:
+        log.info(
+            "%s  %s signal skipped — spread %.1f pips exceeds %.1f pip threshold",
+            pair.upper(), signal.direction, spread_pips, STANDARD_SPREADS[pair] * 2,
+        )
         return state
 
     # ── Place order on Oanda ──────────────────────────────────────────────────
