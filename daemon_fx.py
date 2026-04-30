@@ -20,14 +20,26 @@ trimmed to cap memory use.
 
 Configuration
 -------------
-Copy .env.example to .env and fill in your SMTP credentials.
+Copy .env.example to .env and fill in your credentials.
+
+Trading mode is controlled by two env vars (or the equivalent CLI flags):
+
+  FX_LIVE=false      Paper mode (default) — signals detected, emails sent, no orders placed.
+  FX_LIVE=true       Live mode — Oanda market orders placed on every signal.
+  FX_DRY_RUN=true    Dry-run — signals detected, no emails sent, no orders placed.
+
+CLI flags override the env vars:
+
+  --live             same as FX_LIVE=true
+  --dry-run          same as FX_DRY_RUN=true
 
 Usage
 -----
-    python daemon.py                    # monitor all FX pairs, poll every 5 min
-    python daemon.py --pair eurusd      # single pair
-    python daemon.py --interval 60      # poll every 60 s (useful for testing)
-    python daemon.py --dry-run          # log events, do not send emails
+    python daemon_fx.py                         # paper mode — all pairs, poll every 5 min
+    python daemon_fx.py --live                  # live mode — place Oanda orders
+    python daemon_fx.py --pair eurusd           # single pair
+    python daemon_fx.py --interval 60           # poll every 60 s (useful for testing)
+    python daemon_fx.py --dry-run               # log events only, no emails or orders
 
 Running as a background process (macOS / Linux)
 ------------------------------------------------
@@ -54,6 +66,8 @@ import indicator_eurusd
 import indicator_gbpusd
 import indicator_usdjpy
 import indicator_audusd
+import oanda
+import logsetup
 
 PAIRS: dict[str, str] = {
     "eurusd": "EURUSD=X",
@@ -73,11 +87,10 @@ import tradelog
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-7s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+OANDA_RISK_PCT = float(os.getenv("OANDA_RISK_PCT", "0.01"))
+
+# logsetup.configure() is called in __main__ once the CLI args are parsed,
+# so that --log-level can override the LOG_LEVEL env var before any logging happens.
 log = logging.getLogger("fxtrader.daemon")
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -112,6 +125,7 @@ class Position:
     opened_at:    str    # UTC timestamp string
     basis:        str    # entry basis description
     be_activated: bool = False
+    trade_id:     Optional[str] = None  # Oanda trade ID once the order is filled
 
 
 @dataclass
@@ -260,7 +274,7 @@ def _email_open(pos: Position) -> tuple[str, str]:
     pfmt, unit = _fmt(pos)
     arrow   = "UP" if pos.direction == "BUY" else "DOWN"
     subject = (
-        f"[{pos.pair.upper()}] {arrow} {pos.direction} — "
+        f"[FX] [{pos.pair.upper()}] {arrow} {pos.direction} — "
         f"Entry {pos.entry_price:{pfmt}}"
     )
     body = "\n".join([
@@ -280,7 +294,7 @@ def _email_open(pos: Position) -> tuple[str, str]:
 
 def _email_be(pos: Position) -> tuple[str, str]:
     pfmt, unit = _fmt(pos)
-    subject = f"[{pos.pair.upper()}] {pos.direction} — Stop Moved to Breakeven"
+    subject = f"[FX] [{pos.pair.upper()}] {pos.direction} — Stop Moved to Breakeven"
     body = "\n".join([
         f"Breakeven triggered on {pos.pair.upper()} {pos.direction}",
         "",
@@ -301,8 +315,8 @@ def _email_close(pos: Position, event: str, exit_price: float) -> tuple[str, str
     reason   = "Take Profit" if event == "close_tp" else "Stop Loss"
     sign     = "+" if pnl_pips >= 0 else ""
     subject  = (
-        f"[{pos.pair.upper()}] {pos.direction} Closed — "
-        f"{result} {sign}{pnl_pips:.1f} {unit}"
+        f"{result} — [FX] [{pos.pair.upper()}] {pos.direction} Closed "
+        f"{sign}{pnl_pips:.1f} {unit}"
     )
     body = "\n".join([
         f"Trade Closed : {pos.pair.upper()} {pos.direction}",
@@ -321,6 +335,7 @@ def _email_close(pos: Position, event: str, exit_price: float) -> tuple[str, str
 def _email_startup(
     pairs: list[tuple[str, str]],
     restored: list["Position"],
+    live: bool,
 ) -> tuple[str, str]:
     subject = "[FX Trader] Daemon started"
     lines = [
@@ -328,6 +343,7 @@ def _email_startup(
         "",
         f"Monitoring {len(pairs)} pair(s): {', '.join(p.upper() for p, _ in pairs)}",
         f"Started at : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"Mode       : {'LIVE (orders enabled)' if live else 'PAPER (signal alerts only — no orders placed)'}",
         "",
         "You will receive alerts for OPEN, BE, and CLOSE events.",
     ]
@@ -397,9 +413,40 @@ def _email_daily_summary(
     return subject, "\n".join(lines)
 
 
+# ── Oanda position sizing ─────────────────────────────────────────────────────
+
+def _calc_units(pair: str, risk_pips: float) -> int:
+    """
+    Return the number of units to trade so that `risk_pips` of adverse movement
+    equals exactly OANDA_RISK_PCT of the current account balance.
+
+    For JPY pairs the pip is in JPY, so we convert to USD using the live rate.
+    """
+    try:
+        balance = float(oanda.get_account_summary()["balance"])
+    except Exception as exc:
+        log.warning("Could not fetch account balance for sizing (%s) — using 10 000 fallback", exc)
+        balance = 10_000.0
+
+    risk_usd = balance * OANDA_RISK_PCT
+    pip_size = PAIR_INDICATORS[pair].pip_value(pair)
+
+    if pair == "usdjpy":
+        try:
+            price   = oanda.get_price(pair)
+            rate    = (price["bid"] + price["ask"]) / 2
+        except Exception:
+            rate = 150.0  # conservative fallback
+        pip_usd = pip_size / rate
+    else:
+        pip_usd = pip_size  # quote currency is USD; pip_size already in USD per unit
+
+    return max(int(risk_usd / (risk_pips * pip_usd)), 1)
+
+
 # ── Core tick ─────────────────────────────────────────────────────────────────
 
-def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
+def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) -> PairState:
     """
     One polling cycle for a single pair:
       1. Refresh cached data (incremental fetch).
@@ -438,6 +485,13 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
             if event == "be":
                 log.info("%s  BE triggered — SL moved to %.5f", pair.upper(), pos.entry_price)
                 tradelog.log_be(pos)
+                if live and pos.trade_id:
+                    try:
+                        oanda.modify_trade_sl(pos.trade_id, pos.entry_price)
+                        log.info("%s  Oanda SL moved to breakeven — trade_id=%s",
+                                 pair.upper(), pos.trade_id)
+                    except Exception as exc:
+                        log.warning("%s  Oanda BE move failed: %s", pair.upper(), exc)
                 subj, body = _email_be(pos)
                 if dry_run:
                     log.info("[DRY-RUN] %s", subj)
@@ -504,6 +558,30 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
     if signal.direction == "FLAT":
         return state
 
+    # ── Place order on Oanda ──────────────────────────────────────────────────
+    trade_id = None
+    if live:
+        units = _calc_units(pair, signal.risk_pips)
+        try:
+            result   = oanda.place_market_order(
+                pair        = pair,
+                direction   = signal.direction,
+                units       = units,
+                stop_loss   = signal.stop_loss,
+                take_profit = signal.take_profit,
+            )
+            trade_id = result["orderFillTransaction"]["tradeOpened"]["tradeID"]
+            log.info(
+                "%s  Oanda order filled — trade_id=%s  units=%d",
+                pair.upper(), trade_id, units,
+            )
+        except Exception as exc:
+            log.error(
+                "%s  Oanda order failed — signal discarded: %s",
+                pair.upper(), exc,
+            )
+            return state  # don't track a position we couldn't open
+
     pos = Position(
         pair        = pair,
         symbol      = symbol,
@@ -517,6 +595,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
         rr_ratio    = signal.rr_ratio,
         opened_at   = signal.timestamp,
         basis       = signal.entry_basis,
+        trade_id    = trade_id,
     )
     state.position        = pos
     state.last_signal_bar = entry["bar_time"]
@@ -540,7 +619,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
 
 # ── Daemon loop ───────────────────────────────────────────────────────────────
 
-def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool) -> None:
+def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live: bool) -> None:
     """Poll all watched pairs in sequence, sleep, repeat."""
     states: dict[str, PairState] = {sym: PairState() for _, sym in pairs}
 
@@ -570,15 +649,16 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool) -> N
         log.info("No open positions in trade log")
 
     log.info(
-        "Daemon started — %d pair(s): %s — poll interval %ds%s",
+        "Daemon started — %d pair(s): %s — poll interval %ds%s  [%s]",
         len(pairs),
         ", ".join(p.upper() for p, _ in pairs),
         interval,
         "  [DRY-RUN]" if dry_run else "",
+        "LIVE" if live else "PAPER",
     )
 
     # Send a startup email (includes any restored positions)
-    subj, body = _email_startup(pairs, restored_positions)
+    subj, body = _email_startup(pairs, restored_positions, live)
     if dry_run:
         log.info("[DRY-RUN] %s", subj)
     else:
@@ -592,7 +672,7 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool) -> N
     while True:
         for pair, symbol in pairs:
             try:
-                states[symbol] = tick(pair, symbol, states[symbol], dry_run)
+                states[symbol] = tick(pair, symbol, states[symbol], dry_run, live)
             except Exception as exc:
                 log.exception("%s  unexpected error in tick: %s", pair.upper(), exc)
 
@@ -655,11 +735,28 @@ if __name__ == "__main__":
         help="Poll interval in seconds (default: 300 = 5 min)",
     )
     parser.add_argument(
+        "--live",
+        action="store_true",
+        default=os.getenv("FX_LIVE", "false").lower() == "true",
+        help="Enable live order execution on Oanda (default: FX_LIVE env var, else paper mode)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Log events but do not send emails",
+        default=os.getenv("FX_DRY_RUN", "false").lower() == "true",
+        help="Log events but do not send emails or place orders (default: FX_DRY_RUN env var)",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default=None,
+        metavar="LEVEL",
+        help="Console log level (default: INFO or LOG_LEVEL env var). "
+             "The log file always captures DEBUG and above.",
     )
     args = parser.parse_args()
+
+    logsetup.configure("fxtrader", level=args.log_level)
 
     pairs_to_watch = (
         [(args.pair, PAIRS[args.pair])]
@@ -667,4 +764,4 @@ if __name__ == "__main__":
         else list(PAIRS.items())
     )
 
-    daemon_loop(pairs_to_watch, args.interval, args.dry_run)
+    daemon_loop(pairs_to_watch, args.interval, args.dry_run, args.live)

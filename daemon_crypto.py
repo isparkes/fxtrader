@@ -17,11 +17,23 @@ Copy .env.example to .env and set:
   CRYPTO_RISK_USD, CRYPTO_TRADE_SIZE_USD
   SMTP_* / MAIL_* for email alerts.
 
+Trading mode is controlled by two env vars (or the equivalent CLI flags):
+
+  CRYPTO_LIVE=false      Paper mode (default) — signals detected, emails sent, no orders placed.
+  CRYPTO_LIVE=true       Live mode — Binance market entry + OCO exit orders placed on every signal.
+  CRYPTO_DRY_RUN=true    Dry-run — signals detected, no emails sent, no orders placed.
+
+CLI flags override the env vars:
+
+  --live                 same as CRYPTO_LIVE=true
+  --dry-run              same as CRYPTO_DRY_RUN=true
+
 Usage
 -----
-    python daemon_crypto.py                    # monitor BTCUSD, poll every 5 min
+    python daemon_crypto.py                    # paper mode — BTCUSD, poll every 5 min
+    python daemon_crypto.py --live             # live mode — place Binance orders
     python daemon_crypto.py --interval 60      # poll every 60 s (useful for testing)
-    python daemon_crypto.py --dry-run          # log events, skip email and Binance orders
+    python daemon_crypto.py --dry-run          # log events only, no emails or orders
 
 Running as a background process (macOS / Linux)
 ------------------------------------------------
@@ -47,6 +59,7 @@ from dotenv import load_dotenv
 import indicator_btcusd
 from mailer import send_email
 import tradelog
+import logsetup
 
 load_dotenv()
 
@@ -57,11 +70,7 @@ try:
 except ImportError:
     _BINANCE_LIB = False
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-7s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+# logsetup.configure() is called in __main__ once CLI args are parsed.
 log = logging.getLogger("cryptotrader.daemon")
 
 PAIRS: dict[str, str] = {
@@ -346,7 +355,7 @@ def check_position_events(pos: Position, bar: pd.Series) -> list[tuple[str, floa
 def _email_open(pos: Position) -> tuple[str, str]:
     arrow   = "UP" if pos.direction == "BUY" else "DOWN"
     subject = (
-        f"[{pos.pair.upper()}] {arrow} {pos.direction} — "
+        f"[Crypto] [{pos.pair.upper()}] {arrow} {pos.direction} — "
         f"Entry ${pos.entry_price:.2f}"
     )
     lines = [
@@ -375,7 +384,7 @@ def _email_open(pos: Position) -> tuple[str, str]:
 
 
 def _email_be(pos: Position) -> tuple[str, str]:
-    subject = f"[{pos.pair.upper()}] {pos.direction} — Stop Moved to Breakeven"
+    subject = f"[Crypto] [{pos.pair.upper()}] {pos.direction} — Stop Moved to Breakeven"
     lines = [
         f"Breakeven triggered on {pos.pair.upper()} {pos.direction}",
         "",
@@ -400,13 +409,13 @@ def _email_close(pos: Position, event: str, exit_price: float) -> tuple[str, str
     if pos.qty > 0:
         actual_pnl = pnl_per_btc * pos.qty
         subject = (
-            f"[{pos.pair.upper()}] {pos.direction} Closed — "
-            f"{result} {sign}${actual_pnl:.2f}"
+            f"{result} — [Crypto] [{pos.pair.upper()}] {pos.direction} Closed "
+            f"{sign}${actual_pnl:.2f}"
         )
     else:
         subject = (
-            f"[{pos.pair.upper()}] {pos.direction} Closed — "
-            f"{result} {sign}${pnl_per_btc:.2f}/BTC"
+            f"{result} — [Crypto] [{pos.pair.upper()}] {pos.direction} Closed "
+            f"{sign}${pnl_per_btc:.2f}/BTC"
         )
 
     lines = [
@@ -432,6 +441,7 @@ def _email_close(pos: Position, event: str, exit_price: float) -> tuple[str, str
 def _email_startup(
     pairs: list[tuple[str, str]],
     restored: list[Position],
+    live: bool,
 ) -> tuple[str, str]:
     subject = "[Crypto Trader] Daemon started"
     lines = [
@@ -439,6 +449,7 @@ def _email_startup(
         "",
         f"Monitoring {len(pairs)} pair(s): {', '.join(p.upper() for p, _ in pairs)}",
         f"Started at : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"Mode       : {'LIVE (orders enabled)' if live else 'PAPER (signal alerts only — no orders placed)'}",
         f"Risk/trade : ${CRYPTO_RISK_USD:.0f}  |  Max notional: ${CRYPTO_TRADE_SIZE_USD:.0f}",
         f"Binance    : {'connected' if _binance_client else 'not connected'}",
         "",
@@ -513,7 +524,7 @@ def _email_daily_summary(
 
 # ── Core tick ─────────────────────────────────────────────────────────────────
 
-def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
+def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) -> PairState:
     now = datetime.now(timezone.utc)
 
     try:
@@ -544,7 +555,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
             if event == "be":
                 log.info("%s  BE triggered — SL moved to %.2f", pair.upper(), pos.entry_price)
                 # Replace OCO on Binance with new SL at breakeven
-                if _binance_client and not dry_run and pos.oco_order_list_id and pos.qty > 0:
+                if live and _binance_client and pos.oco_order_list_id and pos.qty > 0:
                     _cancel_oco(_binance_client, pos.pair, pos.oco_order_list_id)
                     pos.oco_order_list_id = _place_oco_exit(
                         _binance_client, pos.pair, pos.direction,
@@ -567,7 +578,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
                     pair.upper(), pos.direction, event, price, pnl,
                 )
                 # Cancel any remaining Binance orders for this pair
-                if _binance_client and not dry_run:
+                if live and _binance_client:
                     _cancel_all_open_orders(_binance_client, pair)
                 tradelog.log_close(pos, event, price, pnl)
                 subj, body = _email_close(pos, event, price)
@@ -637,21 +648,20 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
     state.last_signal_bar = entry["bar_time"]
 
     # ── Execute on Binance ────────────────────────────────────────────────────
-    if _binance_client:
+    if live and _binance_client:
         qty = _round_qty(_calc_qty(
             pos.entry_price, pos.stop_loss, CRYPTO_RISK_USD, CRYPTO_TRADE_SIZE_USD,
         ))
         if qty > 0:
             pos.qty = qty
-            if not dry_run:
-                pos.entry_order_id = _place_entry_order(
-                    _binance_client, pair, pos.direction, qty,
+            pos.entry_order_id = _place_entry_order(
+                _binance_client, pair, pos.direction, qty,
+            )
+            if pos.entry_order_id:
+                pos.oco_order_list_id = _place_oco_exit(
+                    _binance_client, pair, pos.direction,
+                    qty, pos.take_profit, pos.stop_loss,
                 )
-                if pos.entry_order_id:
-                    pos.oco_order_list_id = _place_oco_exit(
-                        _binance_client, pair, pos.direction,
-                        qty, pos.take_profit, pos.stop_loss,
-                    )
 
     log.info(
         "%s  OPEN %s @ %.2f  SL=%.2f  TP=%.2f  ($%.1f/$%.1f  R:R 1:%.2f)%s",
@@ -673,9 +683,9 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool) -> PairState:
 
 # ── Daemon loop ───────────────────────────────────────────────────────────────
 
-def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool) -> None:
+def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live: bool) -> None:
     global _binance_client
-    _binance_client = _init_binance()
+    _binance_client = _init_binance() if live else None
 
     states: dict[str, PairState] = {sym: PairState() for _, sym in pairs}
 
@@ -706,14 +716,15 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool) -> N
         log.info("No open positions in trade log")
 
     log.info(
-        "Daemon started — %d pair(s): %s — poll interval %ds%s",
+        "Daemon started — %d pair(s): %s — poll interval %ds%s  [%s]",
         len(pairs),
         ", ".join(p.upper() for p, _ in pairs),
         interval,
         "  [DRY-RUN]" if dry_run else "",
+        "LIVE" if live else "PAPER",
     )
 
-    subj, body = _email_startup(pairs, restored_positions)
+    subj, body = _email_startup(pairs, restored_positions, live)
     if dry_run:
         log.info("[DRY-RUN] %s", subj)
     else:
@@ -725,7 +736,7 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool) -> N
     while True:
         for pair, symbol in pairs:
             try:
-                states[symbol] = tick(pair, symbol, states[symbol], dry_run)
+                states[symbol] = tick(pair, symbol, states[symbol], dry_run, live)
             except Exception as exc:
                 log.exception("%s  unexpected error in tick: %s", pair.upper(), exc)
 
@@ -786,11 +797,28 @@ if __name__ == "__main__":
         help="Poll interval in seconds (default: 300 = 5 min)",
     )
     parser.add_argument(
+        "--live",
+        action="store_true",
+        default=os.getenv("CRYPTO_LIVE", "false").lower() == "true",
+        help="Enable live order execution on Binance (default: CRYPTO_LIVE env var, else paper mode)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Log events, skip email and Binance order execution",
+        default=os.getenv("CRYPTO_DRY_RUN", "false").lower() == "true",
+        help="Log events, skip email and Binance order execution (default: CRYPTO_DRY_RUN env var)",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default=None,
+        metavar="LEVEL",
+        help="Console log level (default: INFO or LOG_LEVEL env var). "
+             "The log file always captures DEBUG and above.",
     )
     args = parser.parse_args()
+
+    logsetup.configure("cryptotrader", level=args.log_level)
 
     pairs_to_watch = (
         [(args.pair, PAIRS[args.pair])]
@@ -798,4 +826,4 @@ if __name__ == "__main__":
         else list(PAIRS.items())
     )
 
-    daemon_loop(pairs_to_watch, args.interval, args.dry_run)
+    daemon_loop(pairs_to_watch, args.interval, args.dry_run, args.live)

@@ -1,25 +1,27 @@
 services:
   fxtrader:
-    build:
-      context: .
-      dockerfile: Dockerfile.fx
+    image: ${FXTRADER_IMAGE}
     env_file: .env
     restart: unless-stopped
     volumes:
-      - ./signals.jsonl:/app/signals.jsonl
-      - ./fx_trades.jsonl:/app/trades.jsonl
+      - /data/fxtrader/fx_trades.jsonl:/app/trades.jsonl
+      - /data/fxtrader/fxtrader.log:/app/fxtrader.log
     # Override CMD to pass flags, e.g.:
-    #   command: ["--dry-run"]
-    #   command: ["--pair", "eurusd", "--interval", "60"]
+    #   command: ["--live"]                                  # enable Oanda order execution
+    #   command: ["--dry-run"]                               # log only, no emails or orders
+    #   command: ["--live", "--pair", "eurusd", "--interval", "60"]
+    #   command: ["--log-level", "DEBUG"]
 
   cryptotrader:
-    build:
-      context: .
-      dockerfile: Dockerfile.crypto
+    image: ${CRYPTOTRADER_IMAGE}
     env_file: .env
     restart: unless-stopped
     volumes:
-      - ./crypto_trades.jsonl:/app/trades.jsonl
+      - /data/fxtrader/crypto_trades.jsonl:/app/trades.jsonl
+      - /data/fxtrader/cryptotrader.log:/app/cryptotrader.log
     # Override CMD to pass flags, e.g.:
-    #   command: ["--dry-run"]
-    #   command: ["--interval", "60"]
+    #   command: ["--live"]                                  # enable Binance order execution
+    #   command: ["--dry-run"]                               # log only, no emails or orders
+    #   command: ["--live", "--interval", "60"]
+    #   command: ["--log-level", "DEBUG"]
+
