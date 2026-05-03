@@ -92,6 +92,11 @@ class Signal:
     rr_ratio: Optional[float]
 
 
+def compute_h4_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    df["ema_4h"] = EMAIndicator(close=df["close"], window=H4_EMA_PERIOD).ema_indicator()
+    return df
+
+
 def compute_h1_indicators(df: pd.DataFrame) -> pd.DataFrame:
     close = df["close"]
 
@@ -292,7 +297,7 @@ def find_m5_entry(df5m: pd.DataFrame, direction: str,
 def compute_sl_tp(
     entry_result: dict, bias: str, atr: float, spread: float, pv: float
 ) -> Optional[tuple[float, float, float]]:
-    """Return (entry_p, sl, tp) or None if R:R is too low."""
+    """Return (entry_p, sl, tp) or None if R:R is too low. Used by backtest.py."""
     ep      = entry_result["price"]
     pattern = entry_result.get("pattern", "")
 

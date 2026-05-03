@@ -87,9 +87,11 @@ COOLDOWN_MINS       = 30
 
 H1_MAX_BARS = 300
 M5_MAX_BARS = 600
+H4_MAX_BARS = 200
 
 H1_LOOKBACK = pd.Timedelta(hours=3)
 M5_LOOKBACK = pd.Timedelta(minutes=15)
+H4_LOOKBACK = pd.Timedelta(hours=12)
 
 # Trade sizing from .env (can be overridden without code changes)
 CRYPTO_RISK_USD       = float(os.getenv("CRYPTO_RISK_USD", "50"))
@@ -133,6 +135,7 @@ class Position:
 class PairState:
     cache_h1:        Optional[pd.DataFrame] = None
     cache_5m:        Optional[pd.DataFrame] = None
+    cache_4h:        Optional[pd.DataFrame] = None
     position:        Optional[Position]     = None
     cooldown_until:  Optional[datetime]     = None
     last_signal_bar: Optional[str]          = None
@@ -292,22 +295,27 @@ def refresh_data(symbol: str, state: PairState) -> PairState:
         log.info("Initial fetch for %s …", symbol)
         state.cache_h1 = _fetch_raw(symbol, "1h", period="7d")
         state.cache_5m = _fetch_raw(symbol, "5m", period="2d")
+        state.cache_4h = _fetch_raw(symbol, "4h", period="60d")
         log.info(
-            "%s  cache seeded: %d × 1h bars, %d × 5m bars",
-            symbol, len(state.cache_h1), len(state.cache_5m),
+            "%s  cache seeded: %d × 1h bars, %d × 5m bars, %d × 4h bars",
+            symbol, len(state.cache_h1), len(state.cache_5m), len(state.cache_4h),
         )
         return state
 
     h1_start = (state.cache_h1.index[-1] - H1_LOOKBACK).to_pydatetime()
     m5_start = (state.cache_5m.index[-1] - M5_LOOKBACK).to_pydatetime()
+    h4_start = (state.cache_4h.index[-1] - H4_LOOKBACK).to_pydatetime()
 
     new_h1 = _fetch_raw(symbol, "1h", start=h1_start)
     new_5m = _fetch_raw(symbol, "5m", start=m5_start)
+    new_4h = _fetch_raw(symbol, "4h", start=h4_start)
 
     if not new_h1.empty:
         state.cache_h1 = _merge_into_cache(state.cache_h1, new_h1, H1_MAX_BARS)
     if not new_5m.empty:
         state.cache_5m = _merge_into_cache(state.cache_5m, new_5m, M5_MAX_BARS)
+    if not new_4h.empty:
+        state.cache_4h = _merge_into_cache(state.cache_4h, new_4h, H4_MAX_BARS)
 
     return state
 
@@ -543,6 +551,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
     ind   = PAIR_INDICATORS[pair]
     df_h1 = ind.compute_h1_indicators(state.cache_h1.copy())
     df_5m = ind.compute_m5_indicators(state.cache_5m.copy())
+    df_4h = ind.compute_h4_indicators(state.cache_4h.copy()) if state.cache_4h is not None and len(state.cache_4h) >= ind.H4_EMA_PERIOD else None
 
     # ── Manage open position ──────────────────────────────────────────────────
     if state.position is not None:
@@ -611,7 +620,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
                   pair.upper(), state.cooldown_until.strftime("%H:%M UTC"))
         return state
 
-    h1_bias = ind.assess_h1_bias(df_h1)
+    h1_bias = ind.assess_h1_bias(df_h1, df_4h)
     entry   = ind.find_m5_entry(df_5m, h1_bias["direction"])
 
     if h1_bias["direction"] == "FLAT":

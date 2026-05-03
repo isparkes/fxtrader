@@ -61,6 +61,7 @@ from typing import Optional
 import pandas as pd
 import yfinance as yf
 from dotenv import load_dotenv
+from ta.trend import EMAIndicator
 
 import indicator_eurusd
 import indicator_gbpusd
@@ -536,6 +537,13 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
     df_h1 = ind.compute_h1_indicators(state.cache_h1.copy())
     df_5m = ind.compute_m5_indicators(state.cache_5m.copy())
 
+    # Build 4h frame for the EMA22 gate (Measure 4) by resampling the 1h cache
+    df_4h = state.cache_h1.resample("4h").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    ).dropna()
+    df_4h = ind.compute_h1_indicators(df_4h)
+    df_4h["ema_4h"] = EMAIndicator(close=df_4h["close"], window=ind.H4_EMA_PERIOD).ema_indicator()
+
     # ── Manage open position ──────────────────────────────────────────────────
     if state.position is not None:
         pos    = state.position
@@ -600,7 +608,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
                   pair.upper(), state.cooldown_until.strftime("%H:%M UTC"))
         return state
 
-    h1_bias = ind.assess_h1_bias(df_h1)
+    h1_bias = ind.assess_h1_bias(df_h1, df_4h=df_4h)
     entry   = ind.find_m5_entry(df_5m, h1_bias["direction"])
 
     if h1_bias["direction"] == "FLAT":
