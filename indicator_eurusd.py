@@ -502,13 +502,15 @@ def compute_sl_tp(
             return None
         return entry_p, sl, tp
 
+    sl_pips = max(HA_SL_MIN_PIPS, atr * ATR_SL_MULT / pv)
+    sl_dist = sl_pips * pv
     if bias == "BUY":
         entry_p = ep + spread
-        sl      = entry_p - atr * ATR_SL_MULT
+        sl      = entry_p - sl_dist
         tp      = entry_p + atr * ATR_TP_MULT
     else:
         entry_p = ep - spread
-        sl      = entry_p + atr * ATR_SL_MULT
+        sl      = entry_p + sl_dist
         tp      = entry_p - atr * ATR_TP_MULT
     return entry_p, sl, tp
 
@@ -580,14 +582,16 @@ def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD=X")
                 risk_pips=None, reward_pips=None, rr_ratio=None,
             )
     else:
-        # Patterns A and C: ATR-based SL/TP
+        # Patterns A and C: ATR-based SL/TP, floored at HA_SL_MIN_PIPS
+        sl_pips = max(HA_SL_MIN_PIPS, atr * ATR_SL_MULT / pv)
+        sl_dist = sl_pips * pv
         if direction == "BUY":
-            sl = ep - atr * ATR_SL_MULT
+            sl = ep - sl_dist
             tp = ep + atr * ATR_TP_MULT
         else:
-            sl = ep + atr * ATR_SL_MULT
+            sl = ep + sl_dist
             tp = ep - atr * ATR_TP_MULT
-        risk_pips   = abs(ep - sl) / pv
+        risk_pips   = sl_pips
         reward_pips = abs(tp - ep) / pv
         rr          = reward_pips / risk_pips if risk_pips > 0 else 0
 

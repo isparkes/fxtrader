@@ -276,13 +276,14 @@ guards — the HA sequence itself provides the quality filter.
 
 | Parameter | Default | Notes |
 |---|---|---|
-| Stop loss (A/C) | 1h ATR(14) × 0.4 | Set at entry, never widened; ~4–8 pips on EURUSD |
+| Stop loss (A/C) | 1h ATR(14) × 0.4, floored at `HA_SL_MIN_PIPS` | Never tighter than the pair's minimum stop; prevents oversized positions in low-ATR conditions |
 | Take profit | 1h ATR(14) × 3.0 | Wide ceiling; trailing stop typically exits first |
 | Stop loss (D) | Pullback extreme ± buffer, clamped | `HA_SL_MIN_PIPS` to `HA_SL_MAX_PIPS` from entry |
 | Trailing stop — phase 1 | Move to entry (breakeven) | EURUSD: triggered at 70% of TP; others: 80% |
 | Trailing stop — phase 2 | Trail ATR × 0.4 behind best price | Runs from breakeven; exits when momentum exhausts |
 | Cooldown after loss | 6 bars (30 min in scalp mode) | Prevents revenge trading |
 | Spread guard | Block entry if live spread > 2× standard | Queried from Oanda at signal time; guards against news spikes and thin liquidity |
+| Weekend auto-close | Friday ≥ 20:00 UTC | All open positions closed at mid-price before weekend spread blowout; a close email is sent per position. Ticks are skipped entirely on Saturday and Sunday. |
 
 Standard spreads used by the guard (pip thresholds at 2× these values trigger rejection):
 
@@ -333,7 +334,7 @@ independently per pair.
 | Stop loss multiplier | `ATR_SL_MULT` | 0.4 | 0.4 | 0.4 |
 | Take profit multiplier | `ATR_TP_MULT` | 3.0 | 3.0 | 3.0 |
 | Pattern D — SL buffer | `HA_SL_BUFFER_PIPS` | 2 pips | 2 pips | $50 |
-| Pattern D — SL floor | `HA_SL_MIN_PIPS` | 10 pips | 7 pips | $200 |
+| Minimum SL — all patterns | `HA_SL_MIN_PIPS` | 10 pips | 7 pips | $200 |
 | Pattern D — SL ceiling | `HA_SL_MAX_PIPS` | 12 pips | 12 pips | $800 |
 | Breakeven trigger | `TRAIL_ACTIVATE_FRAC` | 0.7 (EURUSD) / 0.8 | 0.8 | 0.8 |
 

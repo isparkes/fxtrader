@@ -489,10 +489,46 @@ def _email_daily_summary(
     subject = f"[Crypto Trader] Daily Summary — {now.strftime('%Y-%m-%d')}"
 
     sign = "+" if month_dollars >= 0 else ""
+
+    acct_line     = "Account Balance   : N/A (paper mode)"
+    open_pnl_line = "Open Trade P&L    : N/A (paper mode)"
+    if _binance_client:
+        try:
+            acct_info   = _binance_client.get_account()
+            usdt_balance = sum(
+                float(b["free"]) + float(b["locked"])
+                for b in acct_info["balances"]
+                if b["asset"] == "USDT"
+            )
+            acct_line = f"Account Balance   : ${usdt_balance:,.2f} USDT"
+
+            open_positions = [
+                states[sym].position for _, sym in pairs if states[sym].position is not None
+            ]
+            if open_positions:
+                ticker  = _binance_client.get_symbol_ticker(symbol="BTCUSDT")
+                cur_price = float(ticker["price"])
+                total_upnl = sum(
+                    (cur_price - pos.entry_price) * pos.qty if pos.direction == "BUY"
+                    else (pos.entry_price - cur_price) * pos.qty
+                    for pos in open_positions
+                    if pos.qty > 0
+                )
+                unreal_sign   = "+" if total_upnl >= 0 else ""
+                open_pnl_line = f"Open Trade P&L    : {unreal_sign}${total_upnl:,.2f}"
+            else:
+                open_pnl_line = "Open Trade P&L    : $0.00 (no open positions)"
+        except Exception as exc:
+            log.warning("Could not fetch account summary for daily email: %s", exc)
+            acct_line     = "Account Balance   : unavailable"
+            open_pnl_line = "Open Trade P&L    : unavailable"
+
     lines = [
         f"Daily Status Summary — {now.strftime('%Y-%m-%d %H:%M UTC')}",
         "",
         f"Monitoring : {', '.join(p.upper() for p, _ in pairs)}",
+        acct_line,
+        open_pnl_line,
         f"Month-to-date P&L : {sign}${month_dollars:.2f}  (resets each calendar month)",
         "",
     ]

@@ -72,7 +72,7 @@ Each signal panel shows:
 |--------------|-----------------------------------------------------|
 | Direction    | **BUY**, **SELL**, or **FLAT** (no signal)          |
 | Entry        | Suggested entry price                               |
-| Stop Loss    | Hard stop (ATR × 0.4 for patterns A/C; clamped pullback extreme for D) |
+| Stop Loss    | Hard stop (ATR × 0.4, floored at `HA_SL_MIN_PIPS` for patterns A/C; clamped pullback extreme for D) |
 | Take Profit  | Wide ceiling (ATR × 3.0 from entry)                |
 | R:R          | Risk-to-reward ratio                                |
 | ATR(14) 1h   | 1h Average True Range — volatility measure         |
@@ -104,12 +104,13 @@ daemons additionally write every OPEN / BE / CLOSE event to their trade logs
 **Session filter:** FX entries only fire during **07:00–16:00 UTC** (London / NY overlap). BTCUSD has no session filter (24/7 market).
 
 **Risk management:**
-- Stop loss (A/C): ATR × 0.4 (~4–8 pips for FX; ~$200–800 for BTC via ATR scaling)
+- Stop loss (A/C): ATR × 0.4, floored at `HA_SL_MIN_PIPS` (10 pips for EURUSD/GBPUSD/AUDUSD, 7 pips for USDJPY). The floor prevents low-ATR conditions from producing an unrealistically tight stop and the correspondingly oversized position that would result.
 - Stop loss (D): pullback candle extreme ± buffer, clamped to `HA_SL_MIN_PIPS`–`HA_SL_MAX_PIPS`
 - Take profit: ATR × 3.0 (wide ceiling)
 - **Breakeven move:** stop moves to entry once price reaches a fraction of the TP distance (70% for EURUSD, 80% for all other pairs)
 - **Cooldown:** no new entry for 30 minutes after a loss
 - **Spread guard:** before every entry the daemon queries the live Oanda bid/ask spread; if it exceeds 2× the pair's standard spread the signal is skipped and logged. Protects against news events and thin-liquidity sessions.
+- **Weekend auto-close:** at 20:00 UTC on Friday the daemon closes every open FX position at the live Oanda mid-price and sends a close email. Pair ticks are skipped entirely on Saturday and Sunday while the market is closed. This prevents positions being stopped out by the widened weekend bid/ask spread.
 
 ---
 
@@ -121,11 +122,13 @@ moves to breakeven, or the trade closes.
 
 ### Email alerts
 
-| Event      | Sent when …                                        |
-|------------|----------------------------------------------------|
-| **OPEN**   | A BUY or SELL signal fires on a watched pair       |
-| **BE**     | Price reaches the breakeven trigger — stop moved to entry |
-| **CLOSE**  | Stop loss or take profit is hit                    |
+| Event               | Sent when …                                        |
+|---------------------|----------------------------------------------------|
+| **OPEN**            | A BUY or SELL signal fires on a watched pair       |
+| **BE**              | Price reaches the breakeven trigger — stop moved to entry |
+| **CLOSE**           | Stop loss or take profit is hit                    |
+| **WEEKEND CLOSE**   | Friday ≥ 20:00 UTC — daemon closes the position ahead of weekend spread blowout |
+| **Daily Summary**   | 08:00 UTC and 20:00 UTC — open positions, month-to-date pips, account balance, and open trade P&L fetched live from Oanda |
 
 No email is sent for FLAT bars or while a position is already open.
 

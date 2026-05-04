@@ -110,6 +110,9 @@ STANDARD_SPREADS: dict[str, float] = {
     "audusd": 1.5,
 }
 
+# Close all open positions at this UTC hour on Friday before the weekend spread blows out.
+WEEKEND_CLOSE_HOUR = 20
+
 # Minimum bars needed for indicator warmup:
 #   EMA50 → 50, MACD(12/26/9) → 26, RSI(14) → 14  → ~70 bars safe floor
 # We keep a generous buffer well above that.
@@ -375,7 +378,12 @@ def _email_close(pos: Position, event: str, exit_price: float) -> tuple[str, str
         else (pos.entry_price - exit_price)
     ) / PAIR_INDICATORS[pos.pair].pip_value(pos.pair)
     result   = "WIN" if pnl_pips > 0 else "LOSS"
-    reason   = "Take Profit" if event == "close_tp" else "Stop Loss"
+    if event == "close_tp":
+        reason = "Take Profit"
+    elif event == "close_weekend":
+        reason = "Weekend Close (pre-market)"
+    else:
+        reason = "Stop Loss"
     sign     = "+" if pnl_pips >= 0 else ""
     subject  = (
         f"{result} — [FX] [{pos.pair.upper()}] {pos.direction} Closed "
@@ -436,10 +444,26 @@ def _email_daily_summary(
     subject = f"[FX Trader] Daily Summary — {now.strftime('%Y-%m-%d')}"
 
     sign = "+" if month_pips >= 0 else ""
+
+    try:
+        acct = oanda.get_account_summary()
+        balance      = float(acct["balance"])
+        unrealized   = float(acct["unrealizedPL"])
+        nav          = float(acct["NAV"])
+        acct_line    = f"Account Balance   : ${balance:,.2f}  (NAV ${nav:,.2f})"
+        unreal_sign  = "+" if unrealized >= 0 else ""
+        open_pnl_line = f"Open Trade P&L    : {unreal_sign}${unrealized:,.2f}"
+    except Exception as exc:
+        log.warning("Could not fetch account summary for daily email: %s", exc)
+        acct_line     = "Account Balance   : unavailable"
+        open_pnl_line = "Open Trade P&L    : unavailable"
+
     lines = [
         f"Daily Status Summary — {now.strftime('%Y-%m-%d %H:%M UTC')}",
         "",
         f"Monitoring : {', '.join(p.upper() for p, _ in pairs)}",
+        acct_line,
+        open_pnl_line,
         f"Month-to-date pips : {sign}{month_pips:.1f}  (resets each calendar month)",
         "",
     ]
@@ -474,6 +498,59 @@ def _email_daily_summary(
         lines.extend(["", "In Cooldown : " + ", ".join(in_cooldown)])
 
     return subject, "\n".join(lines)
+
+
+# ── Weekend position management ───────────────────────────────────────────────
+
+def _close_positions_for_weekend(
+    pairs: list[tuple[str, str]],
+    states: dict[str, "PairState"],
+    live: bool,
+    dry_run: bool,
+) -> None:
+    """
+    Close every open position ahead of the weekend spread blow-out.
+    Called once on Friday at WEEKEND_CLOSE_HOUR UTC.
+    """
+    now = datetime.now(timezone.utc)
+    for pair, symbol in pairs:
+        pos = states[symbol].position
+        if pos is None:
+            continue
+        try:
+            price_data  = oanda.get_price(pair)
+            exit_price  = (price_data["bid"] + price_data["ask"]) / 2
+        except Exception as exc:
+            log.warning("%s  could not fetch price for weekend close: %s", pair.upper(), exc)
+            exit_price = pos.entry_price  # fallback — P&L will show 0
+
+        pv  = PAIR_INDICATORS[pair].pip_value(pair)
+        pnl = (
+            (exit_price - pos.entry_price) if pos.direction == "BUY"
+            else (pos.entry_price - exit_price)
+        ) / pv
+
+        log.info(
+            "%s  weekend close — %s @ %.5f  P&L %.1f pips",
+            pair.upper(), pos.direction, exit_price, pnl,
+        )
+
+        if live and pos.trade_id:
+            try:
+                oanda.close_trade(pos.trade_id)
+                log.info("%s  Oanda trade %s closed for weekend", pair.upper(), pos.trade_id)
+            except Exception as exc:
+                log.error("%s  Oanda weekend close failed: %s", pair.upper(), exc)
+
+        tradelog.log_close(pos, "close_weekend", exit_price, pnl)
+        subj, body = _email_close(pos, "close_weekend", exit_price)
+        if dry_run:
+            log.info("[DRY-RUN] %s", subj)
+        else:
+            send_email(subj, body)
+
+        states[symbol].month_pips += pnl
+        states[symbol].position    = None
 
 
 # ── Oanda position sizing ─────────────────────────────────────────────────────
@@ -747,16 +824,35 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
     # AM fires on the first poll at or after 08:00 UTC; PM at or after 20:00 UTC.
     last_summary_slot: Optional[tuple] = None
     current_month: int = datetime.now(timezone.utc).month
+    weekend_close_done: Optional[int] = None  # isoweekday of the Friday we last closed
 
     while True:
-        for pair, symbol in pairs:
-            try:
-                states[symbol] = tick(pair, symbol, states[symbol], dry_run, live)
-            except Exception as exc:
-                log.exception("%s  unexpected error in tick: %s", pair.upper(), exc)
-
         now = datetime.now(timezone.utc)
         today = now.date()
+        weekday = now.weekday()  # 0=Mon … 4=Fri, 5=Sat, 6=Sun
+
+        # ── Weekend: skip pair ticks, market is closed ────────────────────────
+        if weekday in (5, 6):
+            log.debug("Weekend — skipping pair ticks")
+        else:
+            # ── Friday pre-close: flatten all positions before spread blows out ─
+            if weekday == 4 and now.hour >= WEEKEND_CLOSE_HOUR:
+                if weekend_close_done != today.isocalendar()[1]:  # ISO week number
+                    weekend_close_done = today.isocalendar()[1]
+                    any_open = any(states[sym].position is not None for _, sym in pairs)
+                    if any_open:
+                        log.info("Friday %02d:00 UTC — closing all positions for weekend",
+                                 WEEKEND_CLOSE_HOUR)
+                        _close_positions_for_weekend(pairs, states, live, dry_run)
+                    else:
+                        log.info("Friday %02d:00 UTC — no open positions to close",
+                                 WEEKEND_CLOSE_HOUR)
+
+            for pair, symbol in pairs:
+                try:
+                    states[symbol] = tick(pair, symbol, states[symbol], dry_run, live)
+                except Exception as exc:
+                    log.exception("%s  unexpected error in tick: %s", pair.upper(), exc)
 
         # Reset monthly pip totals on calendar month rollover
         if now.month != current_month:
