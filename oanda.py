@@ -156,11 +156,11 @@ def place_market_order(
     return resp.json()
 
 
-def modify_trade_sl(trade_id: str, stop_loss: float) -> dict:
+def modify_trade_sl(trade_id: str, stop_loss: float, pair: str = "") -> dict:
     """Move the stop-loss on an open trade (e.g. to breakeven)."""
     _require_config()
     url = f"{_BASE_URL}/v3/accounts/{_ACCOUNT_ID}/trades/{trade_id}/orders"
-    payload = {"stopLoss": {"price": f"{stop_loss:.5f}"}}
+    payload = {"stopLoss": {"price": _fmt_price(pair, stop_loss)}}
     resp = requests.put(url, headers=_headers(), json=payload, timeout=10)
     resp.raise_for_status()
     return resp.json()

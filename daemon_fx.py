@@ -634,7 +634,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
                 tradelog.log_be(pos)
                 if live and pos.trade_id:
                     try:
-                        oanda.modify_trade_sl(pos.trade_id, pos.entry_price)
+                        oanda.modify_trade_sl(pos.trade_id, pos.entry_price, pair)
                         log.info("%s  Oanda SL moved to breakeven — trade_id=%s",
                                  pair.upper(), pos.trade_id)
                     except Exception as exc:
