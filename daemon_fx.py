@@ -88,7 +88,7 @@ import tradelog
 
 load_dotenv()
 
-OANDA_RISK_PCT  = float(os.getenv("OANDA_RISK_PCT", "0.01"))
+OANDA_RISK_PCT  = float(os.getenv("OANDA_RISK_PCT", "1"))    # percent of account, e.g. 1 = 1%, 0.8 = 0.8%
 FX_DATA_SOURCE  = os.getenv("FX_DATA_SOURCE", "yfinance").lower()
 
 # logsetup.configure() is called in __main__ once the CLI args are parsed,
@@ -558,7 +558,7 @@ def _close_positions_for_weekend(
 def _calc_units(pair: str, risk_pips: float) -> int:
     """
     Return the number of units to trade so that `risk_pips` of adverse movement
-    equals exactly OANDA_RISK_PCT of the current account balance.
+    equals exactly OANDA_RISK_PCT percent of the current account balance.
 
     For JPY pairs the pip is in JPY, so we convert to USD using the live rate.
     """
@@ -568,7 +568,7 @@ def _calc_units(pair: str, risk_pips: float) -> int:
         log.warning("Could not fetch account balance for sizing (%s) — using 10 000 fallback", exc)
         balance = 10_000.0
 
-    risk_usd = balance * OANDA_RISK_PCT
+    risk_usd = balance * OANDA_RISK_PCT / 100
     pip_size = PAIR_INDICATORS[pair].pip_value(pair)
 
     if pair == "usdjpy":

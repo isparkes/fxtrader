@@ -107,6 +107,12 @@ def get_price(pair: str) -> dict:
 
 # ── Orders ────────────────────────────────────────────────────────────────────
 
+def _fmt_price(pair: str, price: float) -> str:
+    """Format a price with the correct decimal precision for the instrument."""
+    decimals = 3 if "jpy" in pair.lower() else 5
+    return f"{price:.{decimals}f}"
+
+
 def place_market_order(
     pair: str,
     direction: str,
@@ -136,13 +142,17 @@ def place_market_order(
             "instrument":  instrument,
             "units":       str(signed_units),
             "timeInForce": "FOK",
-            "stopLossOnFill":   {"price": f"{stop_loss:.5f}"},
-            "takeProfitOnFill": {"price": f"{take_profit:.5f}"},
+            "stopLossOnFill":   {"price": _fmt_price(pair, stop_loss)},
+            "takeProfitOnFill": {"price": _fmt_price(pair, take_profit)},
         }
     }
     url = f"{_BASE_URL}/v3/accounts/{_ACCOUNT_ID}/orders"
     resp = requests.post(url, headers=_headers(), json=payload, timeout=10)
-    resp.raise_for_status()
+    if not resp.ok:
+        raise requests.HTTPError(
+            f"{resp.status_code} {resp.reason} — {resp.text}",
+            response=resp,
+        )
     return resp.json()
 
 

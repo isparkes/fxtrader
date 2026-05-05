@@ -14,7 +14,7 @@ Configuration
 -------------
 Copy .env.example to .env and set:
   BINANCE_API_KEY, BINANCE_API_SECRET, BINANCE_TESTNET
-  CRYPTO_RISK_USD, CRYPTO_TRADE_SIZE_USD
+  CRYPTO_RISK_PCT, CRYPTO_TRADE_SIZE_PCT
   SMTP_* / MAIL_* for email alerts.
 
 Trading mode is controlled by two env vars (or the equivalent CLI flags):
@@ -93,9 +93,10 @@ H1_LOOKBACK = pd.Timedelta(hours=3)
 M5_LOOKBACK = pd.Timedelta(minutes=15)
 H4_LOOKBACK = pd.Timedelta(hours=12)
 
-# Trade sizing from .env (can be overridden without code changes)
-CRYPTO_RISK_USD       = float(os.getenv("CRYPTO_RISK_USD", "50"))
-CRYPTO_TRADE_SIZE_USD = float(os.getenv("CRYPTO_TRADE_SIZE_USD", "1000"))
+# Trade sizing from .env — both values are percentages of account balance
+# e.g. CRYPTO_RISK_PCT=1 risks 1% per trade; 0.8 risks 0.8%
+CRYPTO_RISK_PCT       = float(os.getenv("CRYPTO_RISK_PCT",       "1"))   # % of balance to risk per trade
+CRYPTO_TRADE_SIZE_PCT = float(os.getenv("CRYPTO_TRADE_SIZE_PCT", "10"))  # % of balance as max notional cap
 
 # Binance symbol mapping (Yahoo Finance key → Binance symbol)
 BINANCE_SYMBOL_MAP = {"btcusd": "BTCUSDT"}
@@ -164,6 +165,19 @@ def _init_binance() -> Optional["BinanceClient"]:
         return None
 
 
+def _get_usdt_balance(client) -> float:
+    try:
+        info = client.get_account()
+        return sum(
+            float(b["free"]) + float(b["locked"])
+            for b in info["balances"]
+            if b["asset"] == "USDT"
+        )
+    except Exception as exc:
+        log.warning("Could not fetch USDT balance for sizing (%s) — using 10 000 fallback", exc)
+        return 10_000.0
+
+
 def _calc_qty(entry: float, stop_loss: float, risk_usd: float, max_notional: float) -> float:
     sl_dist = abs(entry - stop_loss)
     if sl_dist <= 0:
@@ -206,21 +220,29 @@ def _place_oco_exit(client, pair: str, direction: str,
     tp_p = _round_price(tp)
     sl_p = _round_price(sl)
     if direction == "BUY":
-        exit_side    = "SELL"
-        sl_limit_p   = _round_price(sl * 0.998)   # 0.2% slippage allowance
-    else:
-        exit_side    = "BUY"
-        sl_limit_p   = _round_price(sl * 1.002)
-    try:
-        order = client.create_oco_order(
-            symbol=sym,
-            side=exit_side,
-            quantity=qty,
-            price=str(tp_p),
-            stopPrice=str(sl_p),
-            stopLimitPrice=str(sl_limit_p),
-            stopLimitTimeInForce="GTC",
+        # Exit is SELL: TP (LIMIT_MAKER) is above market, SL (STOP_LOSS_LIMIT) is below
+        exit_side  = "SELL"
+        sl_limit_p = _round_price(sl * 0.998)  # 0.2% slippage allowance
+        params = dict(
+            symbol=sym, side=exit_side, quantity=qty,
+            aboveType="LIMIT_MAKER", abovePrice=str(tp_p),
+            belowType="STOP_LOSS_LIMIT",
+            belowStopPrice=str(sl_p), belowPrice=str(sl_limit_p),
+            belowTimeInForce="GTC",
         )
+    else:
+        # Exit is BUY: SL (STOP_LOSS_LIMIT) is above market, TP (LIMIT_MAKER) is below
+        exit_side  = "BUY"
+        sl_limit_p = _round_price(sl * 1.002)  # 0.2% slippage allowance
+        params = dict(
+            symbol=sym, side=exit_side, quantity=qty,
+            aboveType="STOP_LOSS_LIMIT",
+            aboveStopPrice=str(sl_p), abovePrice=str(sl_limit_p),
+            aboveTimeInForce="GTC",
+            belowType="LIMIT_MAKER", belowPrice=str(tp_p),
+        )
+    try:
+        order = client.create_oco_order(**params)
         list_id = str(order["orderListId"])
         log.info("Binance OCO exit: %s qty=%.5f TP=%.2f SL=%.2f listId=%s",
                  pair.upper(), qty, tp_p, sl_p, list_id)
@@ -458,7 +480,7 @@ def _email_startup(
         f"Monitoring {len(pairs)} pair(s): {', '.join(p.upper() for p, _ in pairs)}",
         f"Started at : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
         f"Mode       : {'LIVE (orders enabled)' if live else 'PAPER (signal alerts only — no orders placed)'}",
-        f"Risk/trade : ${CRYPTO_RISK_USD:.0f}  |  Max notional: ${CRYPTO_TRADE_SIZE_USD:.0f}",
+        f"Risk/trade : {CRYPTO_RISK_PCT:.1f}%  |  Max notional: {CRYPTO_TRADE_SIZE_PCT:.1f}% of account",
         f"Binance    : {'connected' if _binance_client else 'not connected'}",
         "",
         "You will receive alerts for OPEN, BE, and CLOSE events.",
@@ -494,12 +516,7 @@ def _email_daily_summary(
     open_pnl_line = "Open Trade P&L    : N/A (paper mode)"
     if _binance_client:
         try:
-            acct_info   = _binance_client.get_account()
-            usdt_balance = sum(
-                float(b["free"]) + float(b["locked"])
-                for b in acct_info["balances"]
-                if b["asset"] == "USDT"
-            )
+            usdt_balance = _get_usdt_balance(_binance_client)
             acct_line = f"Account Balance   : ${usdt_balance:,.2f} USDT"
 
             open_positions = [
@@ -694,8 +711,11 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
 
     # ── Execute on Binance ────────────────────────────────────────────────────
     if live and _binance_client:
+        _bal  = _get_usdt_balance(_binance_client)
         qty = _round_qty(_calc_qty(
-            pos.entry_price, pos.stop_loss, CRYPTO_RISK_USD, CRYPTO_TRADE_SIZE_USD,
+            pos.entry_price, pos.stop_loss,
+            _bal * CRYPTO_RISK_PCT / 100,
+            _bal * CRYPTO_TRADE_SIZE_PCT / 100,
         ))
         if qty > 0:
             pos.qty = qty

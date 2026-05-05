@@ -79,7 +79,7 @@ For the FX daemon with Oanda integration (live orders or Oanda price feed) also 
 OANDA_API_KEY=...              # personal access token from Oanda
 OANDA_ACCOUNT_ID=...           # numeric account ID from the Oanda hub
 OANDA_ENV=practice             # "practice" (demo) or "live"
-OANDA_RISK_PCT=0.01            # fraction of balance to risk per trade (default 1 %)
+OANDA_RISK_PCT=1               # % of balance to risk per trade (1 = 1%, 0.8 = 0.8%)
 FX_DATA_SOURCE=yfinance        # "yfinance" (default) or "oanda" for price/candle data
 FX_LIVE=false                  # true = place live Oanda market orders on every signal
 ```
@@ -89,8 +89,8 @@ For the crypto daemon also add:
 BINANCE_API_KEY=...
 BINANCE_API_SECRET=...
 BINANCE_TESTNET=false          # set to true to paper-trade on testnet
-CRYPTO_RISK_USD=50             # max risk per trade in USD
-CRYPTO_TRADE_SIZE_USD=1000     # max notional per trade in USD
+CRYPTO_RISK_PCT=1              # % of balance to risk per trade (1 = 1%, 0.8 = 0.8%)
+CRYPTO_TRADE_SIZE_PCT=10       # % of balance as hard cap on notional per trade
 ```
 
 ### Build

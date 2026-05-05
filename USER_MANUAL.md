@@ -165,7 +165,7 @@ The FX daemon uses Oanda for three things: live position sizing (account balance
 OANDA_API_KEY=...              # personal access token from the Oanda hub
 OANDA_ACCOUNT_ID=...           # numeric account ID
 OANDA_ENV=practice             # "practice" (demo) or "live"
-OANDA_RISK_PCT=0.01            # fraction of balance to risk per trade
+OANDA_RISK_PCT=1               # % of balance to risk per trade (1 = 1%, 0.8 = 0.8%)
 FX_DATA_SOURCE=yfinance        # "yfinance" (default) or "oanda" to use Oanda as the candle feed
 FX_LIVE=false                  # true = place live Oanda market orders
 ```
@@ -282,8 +282,8 @@ email alerts on OPEN / BE / CLOSE events. All money amounts are in USD
 BINANCE_API_KEY=...
 BINANCE_API_SECRET=...
 BINANCE_TESTNET=false          # true = paper-trade on Binance testnet
-CRYPTO_RISK_USD=50             # max risk per trade in USD
-CRYPTO_TRADE_SIZE_USD=1000     # max notional per trade in USD
+CRYPTO_RISK_PCT=1              # % of balance to risk per trade (1 = 1%, 0.8 = 0.8%)
+CRYPTO_TRADE_SIZE_PCT=10       # % of balance as hard cap on notional per trade
 ```
 
 ### Starting the crypto daemon
