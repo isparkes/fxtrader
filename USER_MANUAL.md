@@ -81,8 +81,7 @@ Each signal panel shows:
 | MACD Hist    | 1h MACD histogram — momentum direction             |
 | Basis        | Which pattern fired and on which bar               |
 
-All signals are appended to `signals.jsonl` in the current directory.  The
-daemons additionally write every OPEN / BE / CLOSE event to their trade logs
+The daemons write every OPEN / BE / CLOSE event to their trade logs
 (`fx_trades.jsonl` / `crypto_trades.jsonl`).
 
 ### Signal logic summary

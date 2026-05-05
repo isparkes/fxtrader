@@ -20,7 +20,6 @@ against historical data via the walk-forward backtest.
 | `mailer.py` | SMTP email helper used by both daemons |
 | `tradelog.py` | Append-only trade journal — persists positions across daemon restarts |
 | `backtest.py` | Walk-forward backtest — replays the strategy against historical OHLCV data |
-| `signals.jsonl` | Append-only log of every live FX signal that has been generated |
 | `fx_trades.jsonl` | FX daemon trade log — one JSON line per OPEN / BE / CLOSE event |
 | `crypto_trades.jsonl` | Crypto daemon trade log |
 | `{pair}_backtest_trades.csv` | Trade-by-trade backtest output (one file per pair) |
@@ -158,7 +157,6 @@ services:
 # FX daemon — all pairs, default interval
 docker run -d \
   --env-file .env \
-  -v "$(pwd)/signals.jsonl:/app/signals.jsonl" \
   -v "$(pwd)/fx_trades.jsonl:/app/trades.jsonl" \
   --restart unless-stopped \
   fxtrader
@@ -378,8 +376,6 @@ prevents look-ahead bias.
 
 Prints a Rich-formatted panel showing direction, entry, stop loss, take profit,
 R:R ratio, and the indicator values that triggered the signal. Appends the
-signal as a JSON line to `signals.jsonl`.
-
 ### Backtest (`backtest.py`)
 
 Prints a summary table:
