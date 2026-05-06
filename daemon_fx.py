@@ -746,7 +746,11 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
         return state
 
     # ── Place order on Oanda ──────────────────────────────────────────────────
-    trade_id = None
+    trade_id   = None
+    entry_price = signal.entry_price
+    risk_pips   = signal.risk_pips
+    reward_pips = signal.reward_pips
+    rr_ratio    = signal.rr_ratio
     if live:
         units = _calc_units(pair, signal.risk_pips)
         try:
@@ -759,9 +763,17 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
                 occult_stops = occult_stops,
             )
             trade_id = result["orderFillTransaction"]["tradeOpened"]["tradeID"]
+            # Use actual fill price so logged risk_pips reflects reality.
+            fill_str = result["orderFillTransaction"].get("price")
+            if fill_str:
+                pv          = PAIR_INDICATORS[pair].pip_value(pair)
+                entry_price = round(float(fill_str), 5)
+                risk_pips   = round(abs(entry_price - signal.stop_loss) / pv, 1)
+                reward_pips = round(abs(signal.take_profit - entry_price) / pv, 1)
+                rr_ratio    = round(reward_pips / risk_pips, 2) if risk_pips > 0 else 0.0
             log.info(
-                "%s  Oanda order filled — trade_id=%s  units=%d%s",
-                pair.upper(), trade_id, units,
+                "%s  Oanda order filled — trade_id=%s  units=%d  fill=%.5f%s",
+                pair.upper(), trade_id, units, entry_price,
                 "  [occult stops]" if occult_stops else "",
             )
         except Exception as exc:
@@ -775,13 +787,13 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
         pair          = pair,
         symbol        = symbol,
         direction     = signal.direction,
-        entry_price   = signal.entry_price,
+        entry_price   = entry_price,
         stop_loss     = signal.stop_loss,
         take_profit   = signal.take_profit,
         atr           = signal.atr,
-        risk_pips     = signal.risk_pips,
-        reward_pips   = signal.reward_pips,
-        rr_ratio      = signal.rr_ratio,
+        risk_pips     = risk_pips,
+        reward_pips   = reward_pips,
+        rr_ratio      = rr_ratio,
         opened_at     = signal.timestamp,
         basis         = signal.entry_basis,
         trade_id      = trade_id,
