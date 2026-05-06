@@ -126,10 +126,11 @@ class Position:
     rr_ratio:          float
     opened_at:         str
     basis:             str
-    be_activated:      bool         = False
-    qty:               float        = 0.0
+    be_activated:      bool          = False
+    qty:               float         = 0.0
     entry_order_id:    Optional[str] = field(default=None)
     oco_order_list_id: Optional[str] = field(default=None)
+    signal_price:      Optional[float] = field(default=None)  # indicator's intended entry; entry_price is the fill
 
 
 @dataclass
@@ -195,21 +196,29 @@ def _round_price(price: float) -> float:
     return round(price, _PRICE_DEC)
 
 
-def _place_entry_order(client, pair: str, direction: str, qty: float) -> Optional[str]:
+def _place_entry_order(
+    client, pair: str, direction: str, qty: float
+) -> tuple[Optional[str], Optional[float]]:
+    """Returns (order_id, fill_price). fill_price is the weighted-average fill."""
     sym = BINANCE_SYMBOL_MAP.get(pair)
     if not sym:
-        return None
+        return None, None
     try:
         if direction == "BUY":
             order = client.order_market_buy(symbol=sym, quantity=qty)
         else:
             order = client.order_market_sell(symbol=sym, quantity=qty)
-        log.info("Binance market %s: %s qty=%.5f orderId=%s",
-                 direction, pair.upper(), qty, order["orderId"])
-        return str(order["orderId"])
+        order_id = str(order["orderId"])
+        executed = float(order.get("executedQty", 0))
+        quote    = float(order.get("cummulativeQuoteQty", 0))
+        fill_price = round(quote / executed, 2) if executed > 0 else None
+        log.info("Binance market %s: %s qty=%.5f orderId=%s fill=%s",
+                 direction, pair.upper(), qty, order_id,
+                 f"{fill_price:.2f}" if fill_price else "unknown")
+        return order_id, fill_price
     except BinanceAPIException as exc:
         log.error("Binance entry order failed: %s", exc)
-        return None
+        return None, None
 
 
 def _place_oco_exit(client, pair: str, direction: str,
@@ -386,13 +395,17 @@ def _email_open(pos: Position) -> tuple[str, str]:
     arrow   = "UP" if pos.direction == "BUY" else "DOWN"
     subject = (
         f"[Crypto] [{pos.pair.upper()}] {arrow} {pos.direction} — "
-        f"Entry ${pos.entry_price:.2f}"
+        f"Fill ${pos.entry_price:.2f}"
     )
     lines = [
         f"Trade Opened : {pos.pair.upper()} {pos.direction}",
         f"Timestamp    : {pos.opened_at}",
         "",
-        f"Entry        : ${pos.entry_price:.2f}",
+    ]
+    if pos.signal_price is not None and pos.signal_price != pos.entry_price:
+        lines.append(f"Signal Entry : ${pos.signal_price:.2f}")
+    lines += [
+        f"Fill         : ${pos.entry_price:.2f}",
         f"Stop Loss    : ${pos.stop_loss:.2f}  (${pos.risk_pips:.1f} risk/BTC)",
         f"Take Profit  : ${pos.take_profit:.2f}  (${pos.reward_pips:.1f} reward/BTC)",
         f"R:R          : 1 : {pos.rr_ratio:.2f}",
@@ -693,18 +706,19 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
         return state
 
     pos = Position(
-        pair        = pair,
-        symbol      = symbol,
-        direction   = signal.direction,
-        entry_price = signal.entry_price,
-        stop_loss   = signal.stop_loss,
-        take_profit = signal.take_profit,
-        atr         = signal.atr,
-        risk_pips   = signal.risk_pips,
-        reward_pips = signal.reward_pips,
-        rr_ratio    = signal.rr_ratio,
-        opened_at   = signal.timestamp,
-        basis       = signal.entry_basis,
+        pair         = pair,
+        symbol       = symbol,
+        direction    = signal.direction,
+        entry_price  = signal.entry_price,
+        stop_loss    = signal.stop_loss,
+        take_profit  = signal.take_profit,
+        atr          = signal.atr,
+        risk_pips    = signal.risk_pips,
+        reward_pips  = signal.reward_pips,
+        rr_ratio     = signal.rr_ratio,
+        opened_at    = signal.timestamp,
+        basis        = signal.entry_basis,
+        signal_price = signal.entry_price,
     )
     state.position        = pos
     state.last_signal_bar = entry["bar_time"]
@@ -719,9 +733,12 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
         ))
         if qty > 0:
             pos.qty = qty
-            pos.entry_order_id = _place_entry_order(
+            order_id, fill_price = _place_entry_order(
                 _binance_client, pair, pos.direction, qty,
             )
+            pos.entry_order_id = order_id
+            if fill_price is not None:
+                pos.entry_price = fill_price
             if pos.entry_order_id:
                 pos.oco_order_list_id = _place_oco_exit(
                     _binance_client, pair, pos.direction,
@@ -799,6 +816,10 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
     current_month: int = datetime.now(timezone.utc).month
 
     while True:
+        if live and _binance_client is None:
+            log.info("Binance client not connected — attempting reconnect…")
+            _binance_client = _init_binance()
+
         for pair, symbol in pairs:
             try:
                 states[symbol] = tick(pair, symbol, states[symbol], dry_run, live)

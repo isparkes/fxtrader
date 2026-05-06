@@ -148,6 +148,7 @@ class Position:
     be_activated:  bool = False
     trade_id:      Optional[str] = None  # Oanda trade ID once the order is filled
     occult_stops:  bool = False          # True → no broker-side SL/TP; daemon closes explicitly
+    signal_price:  Optional[float] = None  # indicator's intended entry; entry_price is the fill
 
 
 @dataclass
@@ -347,22 +348,26 @@ def _email_open(pos: Position) -> tuple[str, str]:
     arrow   = "UP" if pos.direction == "BUY" else "DOWN"
     subject = (
         f"[FX] [{pos.pair.upper()}] {arrow} {pos.direction} — "
-        f"Entry {pos.entry_price:{pfmt}}"
+        f"Fill {pos.entry_price:{pfmt}}"
     )
     stops_note = "occult (daemon-managed)" if pos.occult_stops else "broker order"
-    body = "\n".join([
+    lines = [
         f"Trade Opened : {pos.pair.upper()} {pos.direction}",
         f"Timestamp    : {pos.opened_at}",
         "",
-        f"Entry        : {pos.entry_price:{pfmt}}",
+    ]
+    if pos.signal_price is not None and pos.signal_price != pos.entry_price:
+        lines.append(f"Signal Entry : {pos.signal_price:{pfmt}}")
+    lines += [
+        f"Fill         : {pos.entry_price:{pfmt}}",
         f"Stop Loss    : {pos.stop_loss:{pfmt}}  ({pos.risk_pips:.1f} {unit})  [{stops_note}]",
         f"Take Profit  : {pos.take_profit:{pfmt}}  ({pos.reward_pips:.1f} {unit})  [{stops_note}]",
         f"R:R          : 1 : {pos.rr_ratio:.2f}",
         f"ATR(14) 1h   : {pos.atr:{pfmt}}",
         "",
         f"Basis: {pos.basis}",
-    ])
-    return subject, body
+    ]
+    return subject, "\n".join(lines)
 
 
 def _email_be(pos: Position) -> tuple[str, str]:
@@ -746,9 +751,10 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
         return state
 
     # ── Place order on Oanda ──────────────────────────────────────────────────
-    trade_id   = None
-    entry_price = signal.entry_price
-    risk_pips   = signal.risk_pips
+    trade_id    = None
+    signal_entry = signal.entry_price
+    entry_price  = signal.entry_price
+    risk_pips    = signal.risk_pips
     reward_pips = signal.reward_pips
     rr_ratio    = signal.rr_ratio
     if live:
@@ -798,6 +804,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
         basis         = signal.entry_basis,
         trade_id      = trade_id,
         occult_stops  = occult_stops,
+        signal_price  = signal_entry,
     )
     state.position        = pos
     state.last_signal_bar = entry["bar_time"]
