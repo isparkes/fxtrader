@@ -24,14 +24,18 @@ Copy .env.example to .env and fill in your credentials.
 
 Trading mode is controlled by two env vars (or the equivalent CLI flags):
 
-  FX_LIVE=false      Paper mode (default) — signals detected, emails sent, no orders placed.
-  FX_LIVE=true       Live mode — Oanda market orders placed on every signal.
-  FX_DRY_RUN=true    Dry-run — signals detected, no emails sent, no orders placed.
+  FX_LIVE=false        Paper mode (default) — signals detected, emails sent, no orders placed.
+  FX_LIVE=true         Live mode — Oanda market orders placed on every signal.
+  FX_DRY_RUN=true      Dry-run — signals detected, no emails sent, no orders placed.
+  FX_OCCULT_STOPS=true Occult stops — SL/TP are NOT sent to the broker; the daemon
+                       monitors price and closes the trade itself when levels are hit.
+                       Defends against stop-hunting by keeping stop levels invisible.
 
 CLI flags override the env vars:
 
   --live             same as FX_LIVE=true
   --dry-run          same as FX_DRY_RUN=true
+  --occult-stops     same as FX_OCCULT_STOPS=true
 
 Usage
 -----
@@ -90,6 +94,7 @@ load_dotenv()
 
 OANDA_RISK_PCT  = float(os.getenv("OANDA_RISK_PCT", "1"))    # percent of account, e.g. 1 = 1%, 0.8 = 0.8%
 FX_DATA_SOURCE  = os.getenv("FX_DATA_SOURCE", "yfinance").lower()
+FX_OCCULT_STOPS = os.getenv("FX_OCCULT_STOPS", "false").lower() == "true"
 
 # logsetup.configure() is called in __main__ once the CLI args are parsed,
 # so that --log-level can override the LOG_LEVEL env var before any logging happens.
@@ -140,8 +145,9 @@ class Position:
     rr_ratio:     float
     opened_at:    str    # UTC timestamp string
     basis:        str    # entry basis description
-    be_activated: bool = False
-    trade_id:     Optional[str] = None  # Oanda trade ID once the order is filled
+    be_activated:  bool = False
+    trade_id:      Optional[str] = None  # Oanda trade ID once the order is filled
+    occult_stops:  bool = False          # True → no broker-side SL/TP; daemon closes explicitly
 
 
 @dataclass
@@ -343,13 +349,14 @@ def _email_open(pos: Position) -> tuple[str, str]:
         f"[FX] [{pos.pair.upper()}] {arrow} {pos.direction} — "
         f"Entry {pos.entry_price:{pfmt}}"
     )
+    stops_note = "occult (daemon-managed)" if pos.occult_stops else "broker order"
     body = "\n".join([
         f"Trade Opened : {pos.pair.upper()} {pos.direction}",
         f"Timestamp    : {pos.opened_at}",
         "",
         f"Entry        : {pos.entry_price:{pfmt}}",
-        f"Stop Loss    : {pos.stop_loss:{pfmt}}  ({pos.risk_pips:.1f} {unit})",
-        f"Take Profit  : {pos.take_profit:{pfmt}}  ({pos.reward_pips:.1f} {unit})",
+        f"Stop Loss    : {pos.stop_loss:{pfmt}}  ({pos.risk_pips:.1f} {unit})  [{stops_note}]",
+        f"Take Profit  : {pos.take_profit:{pfmt}}  ({pos.reward_pips:.1f} {unit})  [{stops_note}]",
         f"R:R          : 1 : {pos.rr_ratio:.2f}",
         f"ATR(14) 1h   : {pos.atr:{pfmt}}",
         "",
@@ -407,14 +414,21 @@ def _email_startup(
     pairs: list[tuple[str, str]],
     restored: list["Position"],
     live: bool,
+    occult_stops: bool = False,
 ) -> tuple[str, str]:
     subject = "[FX Trader] Daemon started"
+    if live:
+        mode_str = "LIVE (orders enabled)"
+        if occult_stops:
+            mode_str += " — OCCULT STOPS (no broker-side SL/TP; daemon closes explicitly)"
+    else:
+        mode_str = "PAPER (signal alerts only — no orders placed)"
     lines = [
         "FX Trader daemon has started successfully.",
         "",
         f"Monitoring {len(pairs)} pair(s): {', '.join(p.upper() for p, _ in pairs)}",
         f"Started at : {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
-        f"Mode       : {'LIVE (orders enabled)' if live else 'PAPER (signal alerts only — no orders placed)'}",
+        f"Mode       : {mode_str}",
         "",
         "You will receive alerts for OPEN, BE, and CLOSE events.",
     ]
@@ -586,7 +600,8 @@ def _calc_units(pair: str, risk_pips: float) -> int:
 
 # ── Core tick ─────────────────────────────────────────────────────────────────
 
-def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) -> PairState:
+def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
+         occult_stops: bool = False) -> PairState:
     """
     One polling cycle for a single pair:
       1. Refresh cached data (incremental fetch).
@@ -632,7 +647,8 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
             if event == "be":
                 log.info("%s  BE triggered — SL moved to %.5f", pair.upper(), pos.entry_price)
                 tradelog.log_be(pos)
-                if live and pos.trade_id:
+                if live and pos.trade_id and not pos.occult_stops:
+                    # Occult mode: no broker-side SL to move; daemon tracks it in memory.
                     try:
                         oanda.modify_trade_sl(pos.trade_id, pos.entry_price, pair)
                         log.info("%s  Oanda SL moved to breakeven — trade_id=%s",
@@ -646,6 +662,21 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
                     send_email(subj, body)
 
             elif event in ("close_tp", "close_sl"):
+                # Occult mode: close the trade explicitly on Oanda and use the
+                # actual fill price rather than the theoretical stop/TP level.
+                if live and pos.occult_stops and pos.trade_id:
+                    try:
+                        result = oanda.close_trade(pos.trade_id)
+                        fill = result.get("orderFillTransaction", {})
+                        if fill.get("price"):
+                            price = float(fill["price"])
+                        log.info(
+                            "%s  Oanda occult close — trade_id=%s  fill=%.5f",
+                            pair.upper(), pos.trade_id, price,
+                        )
+                    except Exception as exc:
+                        log.error("%s  Oanda occult close failed: %s", pair.upper(), exc)
+
                 pnl = (
                     (price - pos.entry_price) if pos.direction == "BUY"
                     else (pos.entry_price - price)
@@ -720,16 +751,18 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
         units = _calc_units(pair, signal.risk_pips)
         try:
             result   = oanda.place_market_order(
-                pair        = pair,
-                direction   = signal.direction,
-                units       = units,
-                stop_loss   = signal.stop_loss,
-                take_profit = signal.take_profit,
+                pair         = pair,
+                direction    = signal.direction,
+                units        = units,
+                stop_loss    = signal.stop_loss,
+                take_profit  = signal.take_profit,
+                occult_stops = occult_stops,
             )
             trade_id = result["orderFillTransaction"]["tradeOpened"]["tradeID"]
             log.info(
-                "%s  Oanda order filled — trade_id=%s  units=%d",
+                "%s  Oanda order filled — trade_id=%s  units=%d%s",
                 pair.upper(), trade_id, units,
+                "  [occult stops]" if occult_stops else "",
             )
         except Exception as exc:
             log.error(
@@ -739,19 +772,20 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
             return state  # don't track a position we couldn't open
 
     pos = Position(
-        pair        = pair,
-        symbol      = symbol,
-        direction   = signal.direction,
-        entry_price = signal.entry_price,
-        stop_loss   = signal.stop_loss,
-        take_profit = signal.take_profit,
-        atr         = signal.atr,
-        risk_pips   = signal.risk_pips,
-        reward_pips = signal.reward_pips,
-        rr_ratio    = signal.rr_ratio,
-        opened_at   = signal.timestamp,
-        basis       = signal.entry_basis,
-        trade_id    = trade_id,
+        pair          = pair,
+        symbol        = symbol,
+        direction     = signal.direction,
+        entry_price   = signal.entry_price,
+        stop_loss     = signal.stop_loss,
+        take_profit   = signal.take_profit,
+        atr           = signal.atr,
+        risk_pips     = signal.risk_pips,
+        reward_pips   = signal.reward_pips,
+        rr_ratio      = signal.rr_ratio,
+        opened_at     = signal.timestamp,
+        basis         = signal.entry_basis,
+        trade_id      = trade_id,
+        occult_stops  = occult_stops,
     )
     state.position        = pos
     state.last_signal_bar = entry["bar_time"]
@@ -775,7 +809,8 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
 
 # ── Daemon loop ───────────────────────────────────────────────────────────────
 
-def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live: bool) -> None:
+def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live: bool,
+                occult_stops: bool = False) -> None:
     """Poll all watched pairs in sequence, sleep, repeat."""
     states: dict[str, PairState] = {sym: PairState() for _, sym in pairs}
 
@@ -793,6 +828,7 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
         pos_data = data.get("position")
         if pos_data:
             pos = Position(**pos_data)
+            pos.occult_stops = occult_stops  # apply current daemon config
             states[symbol].position = pos
             restored_positions.append(pos)
 
@@ -814,7 +850,7 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
     )
 
     # Send a startup email (includes any restored positions)
-    subj, body = _email_startup(pairs, restored_positions, live)
+    subj, body = _email_startup(pairs, restored_positions, live, occult_stops)
     if dry_run:
         log.info("[DRY-RUN] %s", subj)
     else:
@@ -850,7 +886,8 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
 
             for pair, symbol in pairs:
                 try:
-                    states[symbol] = tick(pair, symbol, states[symbol], dry_run, live)
+                    states[symbol] = tick(pair, symbol, states[symbol], dry_run, live,
+                                          occult_stops)
                 except Exception as exc:
                     log.exception("%s  unexpected error in tick: %s", pair.upper(), exc)
 
@@ -922,6 +959,13 @@ if __name__ == "__main__":
         help="Log events but do not send emails or place orders (default: FX_DRY_RUN env var)",
     )
     parser.add_argument(
+        "--occult-stops",
+        action="store_true",
+        default=FX_OCCULT_STOPS,
+        help="Do not send SL/TP to broker; daemon closes the trade when levels are hit "
+             "(default: FX_OCCULT_STOPS env var)",
+    )
+    parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default=None,
@@ -939,4 +983,5 @@ if __name__ == "__main__":
         else list(PAIRS.items())
     )
 
-    daemon_loop(pairs_to_watch, args.interval, args.dry_run, args.live)
+    daemon_loop(pairs_to_watch, args.interval, args.dry_run, args.live,
+                args.occult_stops)

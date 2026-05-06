@@ -119,33 +119,37 @@ def place_market_order(
     units: int,
     stop_loss: float,
     take_profit: float,
+    occult_stops: bool = False,
 ) -> dict:
     """
-    Place a market order with attached stop-loss and take-profit.
+    Place a market order, optionally without broker-side SL/TP orders.
 
     Args:
-        pair:        internal key, e.g. "eurusd"
-        direction:   "BUY" or "SELL"
-        units:       positive integer — sign is applied from direction
-        stop_loss:   absolute price level
-        take_profit: absolute price level
+        pair:         internal key, e.g. "eurusd"
+        direction:    "BUY" or "SELL"
+        units:        positive integer — sign is applied from direction
+        stop_loss:    absolute price level
+        take_profit:  absolute price level
+        occult_stops: when True, omit stopLossOnFill/takeProfitOnFill so no
+                      stop orders are visible to the broker (stop-hunt defence).
+                      The daemon closes the trade explicitly when levels are hit.
 
     Returns the full Oanda order-fill response dict.
     The trade ID lives at response["orderFillTransaction"]["tradeOpened"]["tradeID"].
     """
     _require_config()
-    instrument  = INSTRUMENTS[pair.lower()]
+    instrument   = INSTRUMENTS[pair.lower()]
     signed_units = units if direction == "BUY" else -units
-    payload = {
-        "order": {
-            "type":        "MARKET",
-            "instrument":  instrument,
-            "units":       str(signed_units),
-            "timeInForce": "FOK",
-            "stopLossOnFill":   {"price": _fmt_price(pair, stop_loss)},
-            "takeProfitOnFill": {"price": _fmt_price(pair, take_profit)},
-        }
+    order: dict = {
+        "type":        "MARKET",
+        "instrument":  instrument,
+        "units":       str(signed_units),
+        "timeInForce": "FOK",
     }
+    if not occult_stops:
+        order["stopLossOnFill"]   = {"price": _fmt_price(pair, stop_loss)}
+        order["takeProfitOnFill"] = {"price": _fmt_price(pair, take_profit)}
+    payload = {"order": order}
     url = f"{_BASE_URL}/v3/accounts/{_ACCOUNT_ID}/orders"
     resp = requests.post(url, headers=_headers(), json=payload, timeout=10)
     if not resp.ok:
