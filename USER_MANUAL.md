@@ -168,9 +168,37 @@ OANDA_ENV=practice             # "practice" (demo) or "live"
 OANDA_RISK_PCT=1               # % of balance to risk per trade (1 = 1%, 0.8 = 0.8%)
 FX_DATA_SOURCE=yfinance        # "yfinance" (default) or "oanda" to use Oanda as the candle feed
 FX_LIVE=false                  # true = place live Oanda market orders
+FX_OCCULT_STOPS=false          # true = enable occult stops (see below)
 ```
 
 Set `FX_DATA_SOURCE=oanda` to fetch all OHLCV candles from Oanda instead of Yahoo Finance. This gives institutional-quality tick data and removes the dependency on Yahoo's public API.
+
+### Occult stops
+
+By default, every Oanda market order includes attached `stopLossOnFill` and `takeProfitOnFill` orders so the broker protects the position server-side. With occult stops enabled those attached orders are omitted: the order is placed with no visible stop or target, and the daemon itself monitors the price and closes the trade when either level is hit.
+
+**Why use this:** broker-visible stop orders can be targeted by market makers ("stop hunting") — the price briefly sweeps through a cluster of stops, triggering liquidations, then reverses. Keeping stops invisible removes that information from the order book.
+
+**Trade-offs:**
+
+| | Broker-side SL/TP (default) | Occult stops |
+|---|---|---|
+| Stop protection if daemon crashes | Yes — broker closes automatically | No — position stays open until daemon restarts |
+| Stop-hunt exposure | Yes — levels visible on broker | No — levels known only to the daemon |
+| Breakeven move | Daemon sends a modify request to Oanda | Daemon tracks in memory only; no broker request |
+| Close price | Theoretical SL/TP level | Actual fill price from the explicit close call |
+
+**Enable via env var:**
+```
+FX_OCCULT_STOPS=true
+```
+
+**Enable via CLI flag:**
+```bash
+python daemon_fx.py --live --occult-stops
+```
+
+The startup email and every OPEN email label stop/TP levels as `[occult (daemon-managed)]` so the distinction is clear in your inbox. Occult stops only take effect in live mode (`--live` / `FX_LIVE=true`) — in paper mode there are no broker orders either way.
 
 ### Trade log and restart persistence
 
@@ -197,6 +225,9 @@ python daemon_fx.py --interval 60
 
 # Test without sending emails — events are logged to stdout instead
 python daemon_fx.py --dry-run
+
+# Live mode with occult stops (no SL/TP sent to broker)
+python daemon_fx.py --live --occult-stops
 ```
 
 ### Running in the background (macOS / Linux)

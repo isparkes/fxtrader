@@ -82,6 +82,7 @@ OANDA_ENV=practice             # "practice" (demo) or "live"
 OANDA_RISK_PCT=1               # % of balance to risk per trade (1 = 1%, 0.8 = 0.8%)
 FX_DATA_SOURCE=yfinance        # "yfinance" (default) or "oanda" for price/candle data
 FX_LIVE=false                  # true = place live Oanda market orders on every signal
+FX_OCCULT_STOPS=false          # true = SL/TP not sent to broker; daemon closes explicitly (stop-hunt defence)
 ```
 
 For the crypto daemon also add:
@@ -179,6 +180,7 @@ docker run -d \
 | `--interval <seconds>` | `300` | Poll interval in seconds |
 | `--live` | off | Enable live Oanda order execution (requires `OANDA_API_KEY` / `OANDA_ACCOUNT_ID`) |
 | `--dry-run` | off | Log events but do not send emails or place orders |
+| `--occult-stops` | off | Omit SL/TP from Oanda orders; daemon closes the trade explicitly when levels are hit (stop-hunt defence) |
 
 **daemon_crypto.py**
 
