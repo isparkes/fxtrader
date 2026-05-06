@@ -8,6 +8,7 @@ Usage:
 Columns match the backtest summary table in README.md.
 """
 
+import argparse
 import json
 import sys
 from datetime import datetime, timezone
@@ -22,7 +23,12 @@ PAIR_ORDER = ["eurusd", "gbpusd", "usdjpy", "audusd", "btcusd"]
 BTC_PAIRS  = {"btcusd"}
 
 
-def load_closed_trades(path: Path) -> list[dict]:
+def parse_opened_at(opened_at: str) -> datetime:
+    """Parse the 'opened_at' field, e.g. '2026-04-27 07:26 UTC'."""
+    return datetime.strptime(opened_at, "%Y-%m-%d %H:%M %Z").replace(tzinfo=timezone.utc)
+
+
+def load_closed_trades(path: Path, month_filter: tuple[int, int] | None = None) -> list[dict]:
     trades = []
     with path.open() as f:
         for line in f:
@@ -32,6 +38,10 @@ def load_closed_trades(path: Path) -> list[dict]:
             ev = json.loads(line)
             if ev.get("event") != "close":
                 continue
+            if month_filter is not None:
+                opened_at = parse_opened_at(ev["opened_at"])
+                if (opened_at.year, opened_at.month) != month_filter:
+                    continue
             trades.append({
                 "pair":     ev["pair"].lower(),
                 "ts":       ev["ts"],
@@ -63,18 +73,35 @@ def fmt_date(ts: str) -> str:
 
 
 def main() -> None:
-    path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("fx_trades.jsonl")
+    parser = argparse.ArgumentParser(description="Summarise fx_trades.jsonl as a forward-test table.")
+    parser.add_argument("file", nargs="?", default="fx_trades.jsonl", help="Path to trades JSONL file")
+    parser.add_argument("--month", metavar="YYYY-MM", help="Only include trades opened in this month, e.g. 2026-04")
+    args = parser.parse_args()
+
+    path = Path(args.file)
     if not path.exists():
         print(f"File not found: {path}", file=sys.stderr)
         sys.exit(1)
 
-    all_trades = load_closed_trades(path)
+    month_filter: tuple[int, int] | None = None
+    if args.month:
+        try:
+            dt = datetime.strptime(args.month, "%Y-%m")
+            month_filter = (dt.year, dt.month)
+        except ValueError:
+            print(f"Invalid --month format '{args.month}', expected YYYY-MM", file=sys.stderr)
+            sys.exit(1)
+
+    all_trades = load_closed_trades(path, month_filter)
     if not all_trades:
         print("No closed trades found.", file=sys.stderr)
         sys.exit(1)
 
-    timestamps = [t["ts"] for t in all_trades]
-    period = f"{fmt_date(min(timestamps))} → {fmt_date(max(timestamps))}"
+    if month_filter:
+        period = args.month
+    else:
+        timestamps = [t["ts"] for t in all_trades]
+        period = f"{fmt_date(min(timestamps))} → {fmt_date(max(timestamps))}"
 
     by_pair: dict[str, list[dict]] = {}
     for t in all_trades:
