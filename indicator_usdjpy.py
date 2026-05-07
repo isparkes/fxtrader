@@ -681,9 +681,9 @@ if __name__ == "__main__":
     _parser = _argparse.ArgumentParser(description="FX Scalper — live signal generator")
     _parser.add_argument(
         "--pair",
-        default="eurusd",
+        default="usdjpy",
         choices=list(PAIRS.keys()),
-        help="Currency pair to analyse (default: eurusd)",
+        help="Currency pair to analyse (default: usdjpy)",
     )
     _parser.add_argument(
         "--all",
