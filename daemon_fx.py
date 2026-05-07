@@ -737,6 +737,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
         log.debug("%s  duplicate signal bar (%s) — skipped", pair.upper(), entry["bar_time"])
         return state
 
+
     signal = ind.build_signal(h1_bias, entry, symbol)
     if signal.direction == "FLAT":
         return state
@@ -754,6 +755,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
     trade_id    = None
     signal_entry = signal.entry_price
     entry_price  = signal.entry_price
+    stop_loss    = signal.stop_loss
     risk_pips    = signal.risk_pips
     reward_pips = signal.reward_pips
     rr_ratio    = signal.rr_ratio
@@ -774,7 +776,32 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
             if fill_str:
                 pv          = PAIR_INDICATORS[pair].pip_value(pair)
                 entry_price = round(float(fill_str), 5)
-                risk_pips   = round(abs(entry_price - signal.stop_loss) / pv, 1)
+                # Re-anchor SL to fill price if slippage pushes risk past the max pip cap.
+                sl_max_pips = getattr(ind, "HA_SL_MAX_PIPS", None)
+                if sl_max_pips is not None:
+                    raw_sl_pips = abs(entry_price - stop_loss) / pv
+                    if raw_sl_pips > sl_max_pips:
+                        sl_dist   = sl_max_pips * pv
+                        stop_loss = round(
+                            (entry_price - sl_dist) if signal.direction == "BUY"
+                            else (entry_price + sl_dist),
+                            5,
+                        )
+                        if not occult_stops:
+                            try:
+                                oanda.modify_trade_sl(trade_id, stop_loss, pair)
+                                log.info(
+                                    "%s  SL adjusted %.5f → %.5f after slippage "
+                                    "(%.1f → %.1f pips from fill)",
+                                    pair.upper(), signal.stop_loss, stop_loss,
+                                    raw_sl_pips, sl_max_pips,
+                                )
+                            except Exception as sl_exc:
+                                log.warning(
+                                    "%s  SL adjustment after slippage failed: %s",
+                                    pair.upper(), sl_exc,
+                                )
+                risk_pips   = round(abs(entry_price - stop_loss) / pv, 1)
                 reward_pips = round(abs(signal.take_profit - entry_price) / pv, 1)
                 rr_ratio    = round(reward_pips / risk_pips, 2) if risk_pips > 0 else 0.0
             log.info(
@@ -794,7 +821,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
         symbol        = symbol,
         direction     = signal.direction,
         entry_price   = entry_price,
-        stop_loss     = signal.stop_loss,
+        stop_loss     = stop_loss,
         take_profit   = signal.take_profit,
         atr           = signal.atr,
         risk_pips     = risk_pips,
