@@ -17,6 +17,7 @@ against historical data via the walk-forward backtest.
 | `oanda.py` | Oanda REST API v20 wrapper — account summary, live pricing, order execution, and candle data |
 | `daemon_fx.py` | Long-running daemon for FX pairs — polls, manages positions, sends email alerts |
 | `daemon_crypto.py` | Long-running daemon for BTCUSD — as above, plus Binance order execution |
+| `fxctl.py` | One-shot control client for `daemon_fx.py` — scripting alternative to telnet |
 | `mailer.py` | SMTP email helper used by both daemons |
 | `tradelog.py` | Append-only trade journal — persists positions across daemon restarts |
 | `backtest.py` | Walk-forward backtest — replays the strategy against historical OHLCV data |
@@ -83,6 +84,7 @@ OANDA_RISK_PCT=1               # % of balance to risk per trade (1 = 1%, 0.8 = 0
 FX_DATA_SOURCE=yfinance        # "yfinance" (default) or "oanda" for price/candle data
 FX_LIVE=false                  # true = place live Oanda market orders on every signal
 FX_OCCULT_STOPS=false          # true = SL/TP not sent to broker; daemon closes explicitly (stop-hunt defence)
+FX_CTRL_PORT=9876              # TCP port for the real-time control console (default 9876)
 ```
 
 For the crypto daemon also add:
@@ -152,12 +154,30 @@ services:
     # command: ["--interval", "60"]
 ```
 
+### Control console
+
+The FX daemon exposes a telnet control interface on port **9876**. Connect from
+the Docker host after the container is running:
+
+```bash
+telnet localhost 9876
+```
+
+Commands: `status`, `pause`, `resume`, `be` (move all SLs to breakeven),
+`close` (close all positions at market), `help`, `quit`.
+
+`docker-compose.yml` maps port 9876 to `127.0.0.1:9876` on the host
+(localhost-only — not exposed to the network). To change the port, set
+`FX_CTRL_PORT=<port>` in `.env` and update the `ports:` mapping in
+`docker-compose.yml` to match.
+
 ### Run without Compose
 
 ```bash
 # FX daemon — all pairs, default interval
 docker run -d \
   --env-file .env \
+  -p 127.0.0.1:9876:9876 \
   -v "$(pwd)/fx_trades.jsonl:/app/trades.jsonl" \
   --restart unless-stopped \
   fxtrader
@@ -181,6 +201,7 @@ docker run -d \
 | `--live` | off | Enable live Oanda order execution (requires `OANDA_API_KEY` / `OANDA_ACCOUNT_ID`) |
 | `--dry-run` | off | Log events but do not send emails or place orders |
 | `--occult-stops` | off | Omit SL/TP from Oanda orders; daemon closes the trade explicitly when levels are hit (stop-hunt defence) |
+| `FX_CTRL_PORT` | `9876` | TCP port for the telnet control console (env var only) |
 
 **daemon_crypto.py**
 

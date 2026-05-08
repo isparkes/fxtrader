@@ -3,6 +3,8 @@ services:
     image: ${FXTRADER_IMAGE}
     env_file: .env
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:9876:9876"   # control console — localhost only
     volumes:
       - /data/fxtrader/fx_trades.jsonl:/app/trades.jsonl
       - /data/fxtrader/fxtrader.log:/app/fxtrader.log

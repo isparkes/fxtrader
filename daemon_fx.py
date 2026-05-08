@@ -2,11 +2,12 @@
 FX Scalper Daemon
 =================
 Monitors FX currency pairs (EURUSD, GBPUSD, USDJPY, AUDUSD) continuously,
-caches market data incrementally, and sends email alerts on three events:
+caches market data incrementally, and sends email alerts on four events:
 
   OPEN   — a new scalp signal fires (entry, SL, TP details)
   BE     — stop-loss moved to breakeven (position still live)
-  CLOSE  — trade closed at TP or SL (with P&L in pips)
+  CLOSE  — trade closed at TP, SL, weekend auto-close, or manual close
+  SUMMARY — twice-daily status email (08:00 and 20:00 UTC)
 
 For BTCUSD see daemon_crypto.py.
 
@@ -22,7 +23,7 @@ Configuration
 -------------
 Copy .env.example to .env and fill in your credentials.
 
-Trading mode is controlled by two env vars (or the equivalent CLI flags):
+Trading mode is controlled by env vars (or the equivalent CLI flags):
 
   FX_LIVE=false        Paper mode (default) — signals detected, emails sent, no orders placed.
   FX_LIVE=true         Live mode — Oanda market orders placed on every signal.
@@ -30,6 +31,7 @@ Trading mode is controlled by two env vars (or the equivalent CLI flags):
   FX_OCCULT_STOPS=true Occult stops — SL/TP are NOT sent to the broker; the daemon
                        monitors price and closes the trade itself when levels are hit.
                        Defends against stop-hunting by keeping stop levels invisible.
+  FX_CTRL_PORT=9876    TCP port for the real-time control console (default 9876).
 
 CLI flags override the env vars:
 
@@ -47,15 +49,28 @@ Usage
 
 Running as a background process (macOS / Linux)
 ------------------------------------------------
-    nohup python daemon.py >> fxtrader.log 2>&1 &
+    nohup python daemon_fx.py >> fxtrader.log 2>&1 &
     echo $! > fxtrader.pid              # save PID to stop later
     kill $(cat fxtrader.pid)            # stop the daemon
+
+Real-time control console
+--------------------------
+While the daemon is running, connect via telnet to issue commands:
+
+    telnet localhost 9876
+
+Commands: status, pause, resume, be (move all SLs to breakeven),
+close (close all positions at market), help, quit.
+
+For scripted / one-liner use: python fxctl.py status
 """
 
 import os
 import sys
 import signal
 import time
+import threading
+import socket as _socket
 import logging
 import argparse
 from datetime import date, datetime, timezone, timedelta
@@ -103,6 +118,7 @@ log = logging.getLogger("fxtrader.daemon")
 # ── Constants ─────────────────────────────────────────────────────────────────
 TRAIL_ACTIVATE_FRAC = 0.80   # mirrors backtest.py
 COOLDOWN_MINS       = 30     # post-loss lockout
+CONTROL_PORT        = int(os.getenv("FX_CTRL_PORT", "9876"))
 
 _GRANULARITY_MAP = {"1h": "H1", "5m": "M5"}  # yfinance → Oanda granularity strings
 
@@ -160,6 +176,16 @@ class PairState:
     cooldown_until:  Optional[datetime]     = None
     last_signal_bar: Optional[str]          = None  # prevents duplicate entry on same bar
     month_pips:      float                  = 0.0   # cumulative closed-trade pips this calendar month
+
+
+class ControlState:
+    """Shared state between the main daemon loop and the control socket server."""
+    def __init__(self):
+        self.paused:            bool            = False
+        self.pending_be:        bool            = False
+        self.pending_close_all: bool            = False
+        # Signals the main loop to wake early and process a pending command.
+        self.wake_event:        threading.Event = threading.Event()
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
@@ -394,6 +420,8 @@ def _email_close(pos: Position, event: str, exit_price: float) -> tuple[str, str
         reason = "Take Profit"
     elif event == "close_weekend":
         reason = "Weekend Close (pre-market)"
+    elif event == "close_manual":
+        reason = "Manual Close (console command)"
     else:
         reason = "Stop Loss"
     sign     = "+" if pnl_pips >= 0 else ""
@@ -519,28 +547,26 @@ def _email_daily_summary(
     return subject, "\n".join(lines)
 
 
-# ── Weekend position management ───────────────────────────────────────────────
+# ── Position management helpers ───────────────────────────────────────────────
 
-def _close_positions_for_weekend(
+def _close_all_positions(
     pairs: list[tuple[str, str]],
     states: dict[str, "PairState"],
     live: bool,
     dry_run: bool,
-) -> None:
-    """
-    Close every open position ahead of the weekend spread blow-out.
-    Called once on Friday at WEEKEND_CLOSE_HOUR UTC.
-    """
-    now = datetime.now(timezone.utc)
+    reason: str = "close_manual",
+) -> int:
+    """Close every open position at market. Returns the number of positions closed."""
+    count = 0
     for pair, symbol in pairs:
         pos = states[symbol].position
         if pos is None:
             continue
         try:
-            price_data  = oanda.get_price(pair)
-            exit_price  = (price_data["bid"] + price_data["ask"]) / 2
+            price_data = oanda.get_price(pair)
+            exit_price = (price_data["bid"] + price_data["ask"]) / 2
         except Exception as exc:
-            log.warning("%s  could not fetch price for weekend close: %s", pair.upper(), exc)
+            log.warning("%s  could not fetch price for close (%s): %s", pair.upper(), reason, exc)
             exit_price = pos.entry_price  # fallback — P&L will show 0
 
         pv  = PAIR_INDICATORS[pair].pip_value(pair)
@@ -550,19 +576,19 @@ def _close_positions_for_weekend(
         ) / pv
 
         log.info(
-            "%s  weekend close — %s @ %.5f  P&L %.1f pips",
-            pair.upper(), pos.direction, exit_price, pnl,
+            "%s  %s — %s @ %.5f  P&L %.1f pips",
+            pair.upper(), reason, pos.direction, exit_price, pnl,
         )
 
         if live and pos.trade_id:
             try:
                 oanda.close_trade(pos.trade_id)
-                log.info("%s  Oanda trade %s closed for weekend", pair.upper(), pos.trade_id)
+                log.info("%s  Oanda trade %s closed (%s)", pair.upper(), pos.trade_id, reason)
             except Exception as exc:
-                log.error("%s  Oanda weekend close failed: %s", pair.upper(), exc)
+                log.error("%s  Oanda close failed (%s): %s", pair.upper(), reason, exc)
 
-        tradelog.log_close(pos, "close_weekend", exit_price, pnl)
-        subj, body = _email_close(pos, "close_weekend", exit_price)
+        tradelog.log_close(pos, reason, exit_price, pnl)
+        subj, body = _email_close(pos, reason, exit_price)
         if dry_run:
             log.info("[DRY-RUN] %s", subj)
         else:
@@ -570,6 +596,187 @@ def _close_positions_for_weekend(
 
         states[symbol].month_pips += pnl
         states[symbol].position    = None
+        count += 1
+
+    return count
+
+
+def _set_all_breakeven(
+    pairs: list[tuple[str, str]],
+    states: dict[str, "PairState"],
+    live: bool,
+    dry_run: bool,
+) -> int:
+    """Move every open SL to entry price. Returns the number of positions updated."""
+    count = 0
+    for pair, symbol in pairs:
+        pos = states[symbol].position
+        if pos is None or pos.be_activated:
+            continue
+        pos.stop_loss    = pos.entry_price
+        pos.be_activated = True
+        log.info("%s  manual BE — SL moved to %.5f", pair.upper(), pos.entry_price)
+        tradelog.log_be(pos)
+        if live and pos.trade_id and not pos.occult_stops:
+            try:
+                oanda.modify_trade_sl(pos.trade_id, pos.entry_price, pair)
+                log.info("%s  Oanda SL moved to breakeven — trade_id=%s", pair.upper(), pos.trade_id)
+            except Exception as exc:
+                log.warning("%s  Oanda BE move failed: %s", pair.upper(), exc)
+        subj, body = _email_be(pos)
+        if dry_run:
+            log.info("[DRY-RUN] %s", subj)
+        else:
+            send_email(subj, body)
+        count += 1
+
+    return count
+
+
+# ── Weekend position management ───────────────────────────────────────────────
+
+def _close_positions_for_weekend(
+    pairs: list[tuple[str, str]],
+    states: dict[str, "PairState"],
+    live: bool,
+    dry_run: bool,
+) -> None:
+    """Close every open position ahead of the weekend spread blow-out."""
+    _close_all_positions(pairs, states, live, dry_run, reason="close_weekend")
+
+
+# ── Control server ────────────────────────────────────────────────────────────
+
+def _ctrl_status(ctrl: ControlState, states: dict, pairs: list) -> str:
+    """Build a human-readable status string for the 'status' command."""
+    now   = datetime.now(timezone.utc)
+    lines = ["=== FX Trader Daemon Status ==="]
+    lines.append(f"Mode : {'PAUSED (no new entries)' if ctrl.paused else 'Active'}")
+    lines.append("")
+    open_count = 0
+    for pair, symbol in pairs:
+        st = states[symbol]
+        if st.position:
+            open_count += 1
+            pos = st.position
+            be  = "active" if pos.be_activated else "pending"
+            lines.append(
+                f"  {pair.upper():<6}  {pos.direction}  "
+                f"entry={pos.entry_price:.5f}  SL={pos.stop_loss:.5f}  "
+                f"TP={pos.take_profit:.5f}  BE={be}"
+            )
+        elif st.cooldown_until and now < st.cooldown_until:
+            lines.append(
+                f"  {pair.upper():<6}  [cooldown until "
+                f"{st.cooldown_until.strftime('%H:%M UTC')}]"
+            )
+        else:
+            lines.append(f"  {pair.upper():<6}  [no position]")
+    lines.append("")
+    lines.append(f"Open positions: {open_count}")
+    return "\n".join(lines)
+
+
+def _handle_ctrl_cmd(
+    cmd: str,
+    ctrl: ControlState,
+    states: dict,
+    pairs: list,
+) -> str:
+    """Dispatch a control command and return a response string."""
+    cmd = cmd.strip().lower()
+
+    if cmd == "pause":
+        ctrl.paused = True
+        return "Daemon paused — no new entries will be placed."
+
+    if cmd == "resume":
+        ctrl.paused = False
+        return "Daemon resumed — new entries re-enabled."
+
+    if cmd in ("be", "breakeven"):
+        ctrl.pending_be = True
+        ctrl.wake_event.set()
+        return "Breakeven queued — daemon will move all open SLs to entry."
+
+    if cmd in ("close", "close_all"):
+        ctrl.pending_close_all = True
+        ctrl.wake_event.set()
+        return "Close-all queued — daemon will close all open positions at market."
+
+    if cmd == "status":
+        return _ctrl_status(ctrl, states, pairs)
+
+    if cmd in ("help", "?", ""):
+        return (
+            "Commands:\n"
+            "  status    Show daemon status and open positions\n"
+            "  pause     Pause new trade entries\n"
+            "  resume    Resume trade entries\n"
+            "  be        Move all open SLs to breakeven (entry price)\n"
+            "  close     Close all open positions at market\n"
+            "  help      Show this help"
+        )
+
+    return f"Unknown command: '{cmd}' — type 'help' for the command list."
+
+
+def _start_control_server(
+    ctrl: ControlState,
+    states: dict,
+    pairs: list,
+) -> None:
+    """
+    Start a background thread that listens on TCP for control commands.
+    Binds to 0.0.0.0:CONTROL_PORT so Docker port-mapping works.
+    Each connection receives exactly one command and gets one response, then closes.
+    """
+    srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    srv.bind(("0.0.0.0", CONTROL_PORT))
+    srv.listen(8)
+    srv.settimeout(1.0)  # allows the thread to exit cleanly when the process dies
+
+    log.info("Control server listening on port %d  (telnet localhost %d)", CONTROL_PORT, CONTROL_PORT)
+
+    def _handle_connection(conn: "_socket.socket") -> None:
+        conn.sendall(b"FX Trader  |  help=commands  quit=disconnect\r\n\r\n> ")
+        f = conn.makefile("rb")
+        while True:
+            raw = f.readline(256)
+            if not raw:
+                break
+            # Strip telnet control bytes (IAC sequences etc.) — keep printable ASCII only
+            cmd = bytes(b for b in raw if 32 <= b < 127).decode().strip()
+            if not cmd:
+                conn.sendall(b"> ")
+                continue
+            if cmd.lower() in ("quit", "exit", "q"):
+                conn.sendall(b"Bye.\r\n")
+                break
+            resp = _handle_ctrl_cmd(cmd, ctrl, states, pairs)
+            conn.sendall(resp.encode() + b"\r\n\r\n> ")
+
+    def _server() -> None:
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except _socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                _handle_connection(conn)
+            except Exception as exc:
+                log.debug("Control connection error: %s", exc)
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    t = threading.Thread(target=_server, daemon=True, name="fxtrader-ctrl")
+    t.start()
 
 
 # ── Oanda position sizing ─────────────────────────────────────────────────────
@@ -606,7 +813,7 @@ def _calc_units(pair: str, risk_pips: float) -> int:
 # ── Core tick ─────────────────────────────────────────────────────────────────
 
 def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
-         occult_stops: bool = False) -> PairState:
+         occult_stops: bool = False, paused: bool = False) -> PairState:
     """
     One polling cycle for a single pair:
       1. Refresh cached data (incremental fetch).
@@ -716,6 +923,10 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
         return state
 
     # ── Look for a new entry ──────────────────────────────────────────────────
+    if paused:
+        log.debug("%s  daemon paused — skipping entry check", pair.upper())
+        return state
+
     if state.cooldown_until and now < state.cooldown_until:
         log.debug("%s  in cooldown until %s",
                   pair.upper(), state.cooldown_until.strftime("%H:%M UTC"))
@@ -859,6 +1070,7 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
                 occult_stops: bool = False) -> None:
     """Poll all watched pairs in sequence, sleep, repeat."""
     states: dict[str, PairState] = {sym: PairState() for _, sym in pairs}
+    ctrl   = ControlState()
 
     # ── Restore open positions from trade log ─────────────────────────────────
     saved = tradelog.load_state()
@@ -886,6 +1098,8 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
     else:
         log.info("No open positions in trade log")
 
+    _start_control_server(ctrl, states, pairs)
+
     log.info(
         "Daemon started — %d pair(s): %s — poll interval %ds%s  [%s]",
         len(pairs),
@@ -909,9 +1123,24 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
     weekend_close_done: Optional[int] = None  # isoweekday of the Friday we last closed
 
     while True:
-        now = datetime.now(timezone.utc)
-        today = now.date()
+        # Sleep until next scheduled poll or until a control command wakes us early.
+        ctrl.wake_event.wait(timeout=interval)
+        ctrl.wake_event.clear()
+
+        now     = datetime.now(timezone.utc)
+        today   = now.date()
         weekday = now.weekday()  # 0=Mon … 4=Fri, 5=Sat, 6=Sun
+
+        # ── Process immediate control commands ────────────────────────────────
+        if ctrl.pending_close_all:
+            ctrl.pending_close_all = False
+            n = _close_all_positions(pairs, states, live, dry_run, reason="close_manual")
+            log.info("Manual close-all: %d position(s) closed", n)
+
+        if ctrl.pending_be:
+            ctrl.pending_be = False
+            n = _set_all_breakeven(pairs, states, live, dry_run)
+            log.info("Manual breakeven: %d position(s) updated", n)
 
         # ── Weekend: skip pair ticks, market is closed ────────────────────────
         if weekday in (5, 6):
@@ -933,7 +1162,7 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
             for pair, symbol in pairs:
                 try:
                     states[symbol] = tick(pair, symbol, states[symbol], dry_run, live,
-                                          occult_stops)
+                                          occult_stops, paused=ctrl.paused)
                 except Exception as exc:
                     log.exception("%s  unexpected error in tick: %s", pair.upper(), exc)
 
@@ -961,8 +1190,6 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
                 log.info("[DRY-RUN] %s", subj)
             else:
                 send_email(subj, body)
-
-        time.sleep(interval)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -119,6 +119,71 @@ Monitors EURUSD, GBPUSD, USDJPY, and AUDUSD indefinitely, polling every 5
 minutes (configurable), and sends email alerts when a trade opens, the stop
 moves to breakeven, or the trade closes.
 
+### Real-time control console
+
+The daemon listens for control commands on TCP port **9876** (default).
+Connect with plain telnet from the same machine or, when running in Docker,
+from the host:
+
+```
+telnet localhost 9876
+```
+
+```
+FX Trader  |  help=commands  quit=disconnect
+
+> status
+=== FX Trader Daemon Status ===
+Mode : Active
+
+  EURUSD  [no position]
+  GBPUSD  BUY  entry=1.27350  SL=1.27100  TP=1.27800  BE=pending
+  USDJPY  [cooldown until 14:30 UTC]
+  AUDUSD  [no position]
+
+Open positions: 1
+
+> pause
+Daemon paused — no new entries will be placed.
+
+> be
+Breakeven queued — daemon will move all open SLs to entry.
+
+> close
+Close-all queued — daemon will close all open positions at market.
+
+> resume
+Daemon resumed — new entries re-enabled.
+
+> quit
+Bye.
+```
+
+**Commands:**
+
+| Command    | Effect                                                              |
+|------------|---------------------------------------------------------------------|
+| `status`   | Show running mode, open positions, and cooldown state               |
+| `pause`    | Stop entering new trades; open positions continue to be managed     |
+| `resume`   | Re-enable new trade entries after a pause                           |
+| `be`       | Move every open stop-loss to breakeven immediately                  |
+| `close`    | Close every open position at market immediately                     |
+| `help`     | List available commands                                             |
+| `quit`     | Disconnect                                                          |
+
+`be` and `close` wake the daemon immediately rather than waiting for the next poll, so they execute within a second or two of being issued. A close email is sent for each position closed via `close`; a BE email is sent for each position updated via `be`.
+
+The port can be changed with `FX_CTRL_PORT=<port>` in `.env`.
+
+For scripted / one-liner use there is also `fxctl.py`:
+```bash
+python fxctl.py status
+python fxctl.py pause
+python fxctl.py --host 192.168.1.10 status   # remote host
+```
+
+---
+
 ### Email alerts
 
 | Event               | Sent when …                                        |
@@ -126,6 +191,7 @@ moves to breakeven, or the trade closes.
 | **OPEN**            | A BUY or SELL signal fires on a watched pair       |
 | **BE**              | Price reaches the breakeven trigger — stop moved to entry |
 | **CLOSE**           | Stop loss or take profit is hit                    |
+| **MANUAL CLOSE**    | `close` command sent via control console           |
 | **WEEKEND CLOSE**   | Friday ≥ 20:00 UTC — daemon closes the position ahead of weekend spread blowout |
 | **Daily Summary**   | 08:00 UTC and 20:00 UTC — open positions, month-to-date pips, account balance, and open trade P&L fetched live from Oanda |
 
