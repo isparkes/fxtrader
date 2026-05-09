@@ -144,3 +144,45 @@ The regime is computed from Yahoo Finance daily closes at the start and end of t
 - **Regime context:** all FX pairs remain FLAT in both windows. USDJPY crossed into TREND_UP in the 730d window (+11.8% vs +10.8% prior). Results comparable across snapshots.
 
 ---
+
+## Snapshot — 2026-05-09
+
+**Period:** scalp = 60d ending 2026-05-09 · long = 730d ending 2026-05-09
+**Changes since last snapshot:** (1) Split telnet `pause`/`resume` into independent `pause_entry`/`resume_entry` and `pause_exit`/`resume_exit` commands. (2) Added `materialise_sl` and `materialise_tp` control commands — place real broker SL/TP orders for occult-stops positions on demand. (3) Added `sl_materialised`/`tp_materialised` flags to `Position`; occult exits skip `close_trade()` when the relevant stop is already materialised. (4) Added `modify_trade_tp()` to `oanda.py`. No strategy logic or parameter changes.
+
+### Scalp mode — 60d · 5m bars
+
+60d net-change: EURUSD +1.5%, GBPUSD +1.5%, USDJPY −0.8%, AUDUSD +2.6%, BTCUSD +15.0%
+
+| Pair   | Market Regime | Trades | Win%  | Avg W    | Avg L   |  PF  | Expec      | Total      | Max DD      |
+|--------|---------------|--------|-------|----------|---------|------|------------|------------|-------------|
+| EURUSD | FLAT          |     82 | 42.7% |  28.2 p  | 11.5 p  | 1.82 |   5.4 p/tr |    444.7 p |    −82.5 p  |
+| GBPUSD | FLAT          |     78 | 29.5% |  42.6 p  | 11.9 p  | 1.50 |   4.2 p/tr |    324.9 p |    −95.4 p  |
+| USDJPY | FLAT          |     68 | 22.1% |  59.4 p  | 10.2 p  | 1.64 |   5.1 p/tr |    348.1 p |   −105.0 p  |
+| AUDUSD | FLAT          |     66 | 42.4% |  28.1 p  | 11.8 p  | 1.75 |   5.1 p/tr |    337.5 p |    −70.8 p  |
+| BTCUSD | TREND_UP      |    135 | 27.4% | 964.7 p  | 206.8 p | 1.76 | 114.3 p/tr |  15,430.8 p |  −3,727.9 p |
+
+(p = pips · tr = trade · BTCUSD pips = USD)
+
+### Long mode — 730d · 1h bars
+
+730d net-change: EURUSD +9.7%, GBPUSD +9.1%, USDJPY +0.8%, AUDUSD +10.2%, BTCUSD +27.6%
+
+| Pair   | Market Regime | Trades | Win%  |   Avg W   | Avg L   |  PF  |   Expec    |     Total    | Max DD      |
+|--------|---------------|--------|-------|-----------|---------|------|------------|--------------|-------------|
+| EURUSD | FLAT          |    326 | 24.2% |   53.1 p  | 11.6 p  | 1.46 |   4.1 p/tr |    1,326.1 p |   −193.5 p  |
+| GBPUSD | FLAT          |    354 | 19.5% |   76.1 p  | 12.4 p  | 1.49 |   4.8 p/tr |    1,715.4 p |   −444.1 p  |
+| USDJPY | FLAT          |    354 | 16.9% |  104.3 p  | 12.3 p  | 1.74 |   7.5 p/tr |    2,652.1 p |   −313.5 p  |
+| AUDUSD | TREND_UP      |    341 | 23.8% |   51.4 p  | 11.5 p  | 1.39 |   3.4 p/tr |    1,161.9 p |   −179.0 p  |
+| BTCUSD | TREND_UP      |    326 | 24.5% | 2,619.0 p | 405.8 p | 2.10 | 336.5 p/tr |  109,697.6 p |  −5,244.0 p |
+
+### Notes
+
+- **No strategy changes this snapshot** — all movements are market-driven. Results validate that the control-port and materialise changes have no effect on backtest logic.
+- **EURUSD scalp** ticked back slightly (PF 1.93 → 1.82) but WR is holding at 42.7%. Still the best FX pair by PF this window.
+- **AUDUSD scalp** stable (PF 1.75 unchanged, WR 42.4% unchanged). AUDUSD crossed into TREND_UP in the 730d window (+10.2%); long-mode PF 1.39 is the weakest of the group — watch for further compression if the bull regime matures.
+- **USDJPY scalp** dipped (PF 1.74 → 1.64). The 730d regime dropped from TREND_UP back to FLAT (+0.8%) — the yen trend has unwound. Long-mode PF held (1.73 → 1.74), suggesting robustness across regimes.
+- **GBPUSD** broadly stable in both modes. Long-mode drawdown (−444 p) remains disproportionate to avg loss; no deterioration but continue to monitor.
+- **BTCUSD** essentially unchanged in both modes (scalp PF 1.76, long PF 2.10 vs 2.13 prior — within noise).
+
+---

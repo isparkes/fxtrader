@@ -134,7 +134,7 @@ FX Trader  |  help=commands  quit=disconnect
 
 > status
 === FX Trader Daemon Status ===
-Mode : Active
+Entries : Active  |  Exits : Active
 
   EURUSD  [no position]
   GBPUSD  BUY  entry=1.27350  SL=1.27100  TP=1.27800  BE=pending
@@ -144,7 +144,7 @@ Mode : Active
 Open positions: 1
 
 > pause
-Daemon paused — no new entries will be placed.
+Daemon paused — entries and exits both suspended.
 
 > be
 Breakeven queued — daemon will move all open SLs to entry.
@@ -153,32 +153,47 @@ Breakeven queued — daemon will move all open SLs to entry.
 Close-all queued — daemon will close all open positions at market.
 
 > resume
-Daemon resumed — new entries re-enabled.
+Daemon resumed — entries and exits both re-enabled.
 
 > quit
 Bye.
 ```
 
+When occult stops are active, each position line includes an occult tag showing which stops are broker-side vs daemon-managed:
+
+```
+  GBPUSD  BUY  entry=1.27350  SL=1.27100  TP=1.27800  BE=pending  occult[SL=daemon,TP=daemon]
+```
+
+After `materialise_sl` the SL side changes to `broker`; after `materialise_tp` the TP side changes to `broker`.
+
 **Commands:**
 
-| Command    | Effect                                                              |
-|------------|---------------------------------------------------------------------|
-| `status`   | Show running mode, open positions, and cooldown state               |
-| `pause`    | Stop entering new trades; open positions continue to be managed     |
-| `resume`   | Re-enable new trade entries after a pause                           |
-| `be`       | Move every open stop-loss to breakeven immediately                  |
-| `close`    | Close every open position at market immediately                     |
-| `help`     | List available commands                                             |
-| `quit`     | Disconnect                                                          |
+| Command           | Effect                                                                          |
+|-------------------|---------------------------------------------------------------------------------|
+| `status`          | Show entry/exit pause state, open positions, occult status, and cooldown state  |
+| `pause`           | Suspend both new entries and automatic exits                                    |
+| `resume`          | Re-enable both entries and exits                                                |
+| `pause_entry`     | Stop entering new trades; open positions continue to be managed                 |
+| `resume_entry`    | Re-enable new trade entries                                                     |
+| `pause_exit`      | Suppress automatic position closes (SL/TP hits are logged but not acted on)     |
+| `resume_exit`     | Re-enable automatic position exits                                              |
+| `materialise_sl`  | Place real broker SL orders for every open occult-stops position                |
+| `materialise_tp`  | Place real broker TP orders for every open occult-stops position                |
+| `be`              | Move every open stop-loss to breakeven immediately                              |
+| `close`           | Close every open position at market immediately                                 |
+| `help`            | List available commands                                                         |
+| `quit`            | Disconnect                                                                      |
 
-`be` and `close` wake the daemon immediately rather than waiting for the next poll, so they execute within a second or two of being issued. A close email is sent for each position closed via `close`; a BE email is sent for each position updated via `be`.
+`be`, `close`, `materialise_sl`, and `materialise_tp` wake the daemon immediately rather than waiting for the next poll, so they execute within a second or two of being issued. A close email is sent for each position closed via `close`; a BE email is sent for each position updated via `be`.
 
 The port can be changed with `FX_CTRL_PORT=<port>` in `.env`.
 
 For scripted / one-liner use there is also `fxctl.py`:
 ```bash
 python fxctl.py status
-python fxctl.py pause
+python fxctl.py pause_entry
+python fxctl.py materialise_sl
 python fxctl.py --host 192.168.1.10 status   # remote host
 ```
 
@@ -253,6 +268,8 @@ By default, every Oanda market order includes attached `stopLossOnFill` and `tak
 | Stop-hunt exposure | Yes — levels visible on broker | No — levels known only to the daemon |
 | Breakeven move | Daemon sends a modify request to Oanda | Daemon tracks in memory only; no broker request |
 | Close price | Theoretical SL/TP level | Actual fill price from the explicit close call |
+
+You can promote individual occult stops to real broker orders at any time without restarting the daemon, using the `materialise_sl` and `materialise_tp` control commands. This is useful when you want to hand the position over to the broker for protection (e.g. before a network outage) while having run in occult mode up to that point. Once materialised, the status display reflects `broker` for that side; the daemon continues to track price internally for logging, but no longer sends an explicit close order when that level is hit.
 
 **Enable via env var:**
 ```

@@ -10,6 +10,12 @@ This script is useful for scripting / one-liners:
 
     python fxctl.py status
     python fxctl.py pause
+    python fxctl.py pause_entry
+    python fxctl.py resume_entry
+    python fxctl.py pause_exit
+    python fxctl.py resume_exit
+    python fxctl.py materialise_sl
+    python fxctl.py materialise_tp
     python fxctl.py be
     python fxctl.py close
     python fxctl.py --host 192.168.1.10 status

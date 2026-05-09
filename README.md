@@ -163,8 +163,10 @@ the Docker host after the container is running:
 telnet localhost 9876
 ```
 
-Commands: `status`, `pause`, `resume`, `be` (move all SLs to breakeven),
-`close` (close all positions at market), `help`, `quit`.
+Commands: `status`, `pause`, `resume`, `pause_entry`, `resume_entry`,
+`pause_exit`, `resume_exit`, `materialise_sl`, `materialise_tp`,
+`be` (move all SLs to breakeven), `close` (close all positions at market),
+`help`, `quit`.
 
 `docker-compose.yml` maps port 9876 to `127.0.0.1:9876` on the host
 (localhost-only — not exposed to the network). To change the port, set

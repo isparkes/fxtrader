@@ -59,8 +59,16 @@ While the daemon is running, connect via telnet to issue commands:
 
     telnet localhost 9876
 
-Commands: status, pause, resume, be (move all SLs to breakeven),
-close (close all positions at market), help, quit.
+Commands:
+  status          — running mode, open positions, pause state, occult status
+  pause / resume  — suspend/resume both entries and exits
+  pause_entry / resume_entry  — control new position entries independently
+  pause_exit  / resume_exit   — control automatic position exits independently
+  materialise_sl  — place real broker SL orders for all occult-stops positions
+  materialise_tp  — place real broker TP orders for all occult-stops positions
+  be              — move all open SLs to breakeven (entry price)
+  close           — close all open positions at market
+  help / quit
 
 For scripted / one-liner use: python fxctl.py status
 """
@@ -164,6 +172,8 @@ class Position:
     be_activated:  bool = False
     trade_id:      Optional[str] = None  # Oanda trade ID once the order is filled
     occult_stops:  bool = False          # True → no broker-side SL/TP; daemon closes explicitly
+    sl_materialised: bool = False        # occult SL placed as a real broker order
+    tp_materialised: bool = False        # occult TP placed as a real broker order
     signal_price:  Optional[float] = None  # indicator's intended entry; entry_price is the fill
 
 
@@ -181,11 +191,14 @@ class PairState:
 class ControlState:
     """Shared state between the main daemon loop and the control socket server."""
     def __init__(self):
-        self.paused:            bool            = False
-        self.pending_be:        bool            = False
-        self.pending_close_all: bool            = False
+        self.pause_entry:            bool            = False
+        self.pause_exit:             bool            = False
+        self.pending_be:             bool            = False
+        self.pending_close_all:      bool            = False
+        self.pending_materialise_sl: bool            = False
+        self.pending_materialise_tp: bool            = False
         # Signals the main loop to wake early and process a pending command.
-        self.wake_event:        threading.Event = threading.Event()
+        self.wake_event:             threading.Event = threading.Event()
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
@@ -617,7 +630,7 @@ def _set_all_breakeven(
         pos.be_activated = True
         log.info("%s  manual BE — SL moved to %.5f", pair.upper(), pos.entry_price)
         tradelog.log_be(pos)
-        if live and pos.trade_id and not pos.occult_stops:
+        if live and pos.trade_id and (not pos.occult_stops or pos.sl_materialised):
             try:
                 oanda.modify_trade_sl(pos.trade_id, pos.entry_price, pair)
                 log.info("%s  Oanda SL moved to breakeven — trade_id=%s", pair.upper(), pos.trade_id)
@@ -630,6 +643,56 @@ def _set_all_breakeven(
             send_email(subj, body)
         count += 1
 
+    return count
+
+
+def _materialise_all_sl(
+    pairs: list[tuple[str, str]],
+    states: dict[str, "PairState"],
+    live: bool,
+) -> int:
+    """Place real broker SL orders for all open occult-stops positions. Returns count placed."""
+    count = 0
+    for pair, symbol in pairs:
+        pos = states[symbol].position
+        if pos is None or not pos.occult_stops or pos.sl_materialised:
+            continue
+        if live and pos.trade_id:
+            try:
+                oanda.modify_trade_sl(pos.trade_id, pos.stop_loss, pair)
+                pos.sl_materialised = True
+                log.info("%s  SL materialised at %.5f — trade_id=%s",
+                         pair.upper(), pos.stop_loss, pos.trade_id)
+                count += 1
+            except Exception as exc:
+                log.error("%s  SL materialise failed: %s", pair.upper(), exc)
+        else:
+            log.info("%s  SL materialise skipped (not live or no trade_id)", pair.upper())
+    return count
+
+
+def _materialise_all_tp(
+    pairs: list[tuple[str, str]],
+    states: dict[str, "PairState"],
+    live: bool,
+) -> int:
+    """Place real broker TP orders for all open occult-stops positions. Returns count placed."""
+    count = 0
+    for pair, symbol in pairs:
+        pos = states[symbol].position
+        if pos is None or not pos.occult_stops or pos.tp_materialised:
+            continue
+        if live and pos.trade_id:
+            try:
+                oanda.modify_trade_tp(pos.trade_id, pos.take_profit, pair)
+                pos.tp_materialised = True
+                log.info("%s  TP materialised at %.5f — trade_id=%s",
+                         pair.upper(), pos.take_profit, pos.trade_id)
+                count += 1
+            except Exception as exc:
+                log.error("%s  TP materialise failed: %s", pair.upper(), exc)
+        else:
+            log.info("%s  TP materialise skipped (not live or no trade_id)", pair.upper())
     return count
 
 
@@ -651,7 +714,9 @@ def _ctrl_status(ctrl: ControlState, states: dict, pairs: list) -> str:
     """Build a human-readable status string for the 'status' command."""
     now   = datetime.now(timezone.utc)
     lines = ["=== FX Trader Daemon Status ==="]
-    lines.append(f"Mode : {'PAUSED (no new entries)' if ctrl.paused else 'Active'}")
+    entry_str = "PAUSED" if ctrl.pause_entry else "Active"
+    exit_str  = "PAUSED" if ctrl.pause_exit  else "Active"
+    lines.append(f"Entries : {entry_str}  |  Exits : {exit_str}")
     lines.append("")
     open_count = 0
     for pair, symbol in pairs:
@@ -660,10 +725,16 @@ def _ctrl_status(ctrl: ControlState, states: dict, pairs: list) -> str:
             open_count += 1
             pos = st.position
             be  = "active" if pos.be_activated else "pending"
+            if pos.occult_stops:
+                sl_side = "broker" if pos.sl_materialised else "daemon"
+                tp_side = "broker" if pos.tp_materialised else "daemon"
+                occult_tag = f"  occult[SL={sl_side},TP={tp_side}]"
+            else:
+                occult_tag = ""
             lines.append(
                 f"  {pair.upper():<6}  {pos.direction}  "
                 f"entry={pos.entry_price:.5f}  SL={pos.stop_loss:.5f}  "
-                f"TP={pos.take_profit:.5f}  BE={be}"
+                f"TP={pos.take_profit:.5f}  BE={be}{occult_tag}"
             )
         elif st.cooldown_until and now < st.cooldown_until:
             lines.append(
@@ -687,12 +758,40 @@ def _handle_ctrl_cmd(
     cmd = cmd.strip().lower()
 
     if cmd == "pause":
-        ctrl.paused = True
-        return "Daemon paused — no new entries will be placed."
+        ctrl.pause_entry = True
+        ctrl.pause_exit  = True
+        return "Daemon paused — entries and exits both suspended."
 
     if cmd == "resume":
-        ctrl.paused = False
-        return "Daemon resumed — new entries re-enabled."
+        ctrl.pause_entry = False
+        ctrl.pause_exit  = False
+        return "Daemon resumed — entries and exits both re-enabled."
+
+    if cmd == "pause_entry":
+        ctrl.pause_entry = True
+        return "Entry paused — no new positions will be opened."
+
+    if cmd == "resume_entry":
+        ctrl.pause_entry = False
+        return "Entry resumed — new positions re-enabled."
+
+    if cmd == "pause_exit":
+        ctrl.pause_exit = True
+        return "Exit paused — daemon will not close positions automatically."
+
+    if cmd == "resume_exit":
+        ctrl.pause_exit = False
+        return "Exit resumed — automatic position closing re-enabled."
+
+    if cmd == "materialise_sl":
+        ctrl.pending_materialise_sl = True
+        ctrl.wake_event.set()
+        return "SL materialise queued — will place broker SL orders for all occult positions."
+
+    if cmd == "materialise_tp":
+        ctrl.pending_materialise_tp = True
+        ctrl.wake_event.set()
+        return "TP materialise queued — will place broker TP orders for all occult positions."
 
     if cmd in ("be", "breakeven"):
         ctrl.pending_be = True
@@ -710,12 +809,18 @@ def _handle_ctrl_cmd(
     if cmd in ("help", "?", ""):
         return (
             "Commands:\n"
-            "  status    Show daemon status and open positions\n"
-            "  pause     Pause new trade entries\n"
-            "  resume    Resume trade entries\n"
-            "  be        Move all open SLs to breakeven (entry price)\n"
-            "  close     Close all open positions at market\n"
-            "  help      Show this help"
+            "  status          Show daemon status and open positions\n"
+            "  pause           Pause both entries and exits\n"
+            "  resume          Resume both entries and exits\n"
+            "  pause_entry     Pause new trade entries only\n"
+            "  resume_entry    Resume new trade entries\n"
+            "  pause_exit      Pause automatic position exits only\n"
+            "  resume_exit     Resume automatic position exits\n"
+            "  materialise_sl  Place real broker SL orders for occult positions\n"
+            "  materialise_tp  Place real broker TP orders for occult positions\n"
+            "  be              Move all open SLs to breakeven (entry price)\n"
+            "  close           Close all open positions at market\n"
+            "  help            Show this help"
         )
 
     return f"Unknown command: '{cmd}' — type 'help' for the command list."
@@ -813,7 +918,8 @@ def _calc_units(pair: str, risk_pips: float) -> int:
 # ── Core tick ─────────────────────────────────────────────────────────────────
 
 def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
-         occult_stops: bool = False, paused: bool = False) -> PairState:
+         occult_stops: bool = False, pause_entry: bool = False,
+         pause_exit: bool = False) -> PairState:
     """
     One polling cycle for a single pair:
       1. Refresh cached data (incremental fetch).
@@ -859,8 +965,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
             if event == "be":
                 log.info("%s  BE triggered — SL moved to %.5f", pair.upper(), pos.entry_price)
                 tradelog.log_be(pos)
-                if live and pos.trade_id and not pos.occult_stops:
-                    # Occult mode: no broker-side SL to move; daemon tracks it in memory.
+                if live and pos.trade_id and (not pos.occult_stops or pos.sl_materialised):
                     try:
                         oanda.modify_trade_sl(pos.trade_id, pos.entry_price, pair)
                         log.info("%s  Oanda SL moved to breakeven — trade_id=%s",
@@ -874,20 +979,31 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
                     send_email(subj, body)
 
             elif event in ("close_tp", "close_sl"):
+                if pause_exit:
+                    log.info("%s  %s hit but exit is paused — holding position",
+                             pair.upper(), event)
+                    continue
+
                 # Occult mode: close the trade explicitly on Oanda and use the
                 # actual fill price rather than the theoretical stop/TP level.
+                # Skip if the relevant stop has been materialised (broker closes automatically).
                 if live and pos.occult_stops and pos.trade_id:
-                    try:
-                        result = oanda.close_trade(pos.trade_id)
-                        fill = result.get("orderFillTransaction", {})
-                        if fill.get("price"):
-                            price = float(fill["price"])
-                        log.info(
-                            "%s  Oanda occult close — trade_id=%s  fill=%.5f",
-                            pair.upper(), pos.trade_id, price,
-                        )
-                    except Exception as exc:
-                        log.error("%s  Oanda occult close failed: %s", pair.upper(), exc)
+                    already_materialised = (
+                        (event == "close_sl" and pos.sl_materialised) or
+                        (event == "close_tp" and pos.tp_materialised)
+                    )
+                    if not already_materialised:
+                        try:
+                            result = oanda.close_trade(pos.trade_id)
+                            fill = result.get("orderFillTransaction", {})
+                            if fill.get("price"):
+                                price = float(fill["price"])
+                            log.info(
+                                "%s  Oanda occult close — trade_id=%s  fill=%.5f",
+                                pair.upper(), pos.trade_id, price,
+                            )
+                        except Exception as exc:
+                            log.error("%s  Oanda occult close failed: %s", pair.upper(), exc)
 
                 pnl = (
                     (price - pos.entry_price) if pos.direction == "BUY"
@@ -923,8 +1039,8 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
         return state
 
     # ── Look for a new entry ──────────────────────────────────────────────────
-    if paused:
-        log.debug("%s  daemon paused — skipping entry check", pair.upper())
+    if pause_entry:
+        log.debug("%s  entry paused — skipping entry check", pair.upper())
         return state
 
     if state.cooldown_until and now < state.cooldown_until:
@@ -1142,6 +1258,16 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
             n = _set_all_breakeven(pairs, states, live, dry_run)
             log.info("Manual breakeven: %d position(s) updated", n)
 
+        if ctrl.pending_materialise_sl:
+            ctrl.pending_materialise_sl = False
+            n = _materialise_all_sl(pairs, states, live)
+            log.info("SL materialise: %d position(s) updated", n)
+
+        if ctrl.pending_materialise_tp:
+            ctrl.pending_materialise_tp = False
+            n = _materialise_all_tp(pairs, states, live)
+            log.info("TP materialise: %d position(s) updated", n)
+
         # ── Weekend: skip pair ticks, market is closed ────────────────────────
         if weekday in (5, 6):
             log.debug("Weekend — skipping pair ticks")
@@ -1162,7 +1288,9 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
             for pair, symbol in pairs:
                 try:
                     states[symbol] = tick(pair, symbol, states[symbol], dry_run, live,
-                                          occult_stops, paused=ctrl.paused)
+                                          occult_stops,
+                                          pause_entry=ctrl.pause_entry,
+                                          pause_exit=ctrl.pause_exit)
                 except Exception as exc:
                     log.exception("%s  unexpected error in tick: %s", pair.upper(), exc)
 

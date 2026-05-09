@@ -170,6 +170,16 @@ def modify_trade_sl(trade_id: str, stop_loss: float, pair: str = "") -> dict:
     return resp.json()
 
 
+def modify_trade_tp(trade_id: str, take_profit: float, pair: str = "") -> dict:
+    """Place or move the take-profit order on an open trade."""
+    _require_config()
+    url = f"{_BASE_URL}/v3/accounts/{_ACCOUNT_ID}/trades/{trade_id}/orders"
+    payload = {"takeProfit": {"price": _fmt_price(pair, take_profit)}}
+    resp = requests.put(url, headers=_headers(), json=payload, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def close_trade(trade_id: str) -> dict:
     """Close an open trade in full by its Oanda trade ID."""
     _require_config()
