@@ -186,6 +186,8 @@ def fetch_data(symbol: str, ind) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFra
     }).dropna()
     df_4h = ind.compute_h1_indicators(df_4h)
     df_4h["ema_4h"] = EMAIndicator(close=df_4h["close"], window=ind.H4_EMA_PERIOD).ema_indicator()
+    if hasattr(ind, "compute_supertrend"):
+        df_4h = ind.compute_supertrend(df_4h, period=10, multiplier=3.0)
 
     df_5m = yf.download(symbol, interval="5m", period="60d", progress=False, auto_adjust=True)
     df_5m = flatten_columns(df_5m)
@@ -258,6 +260,7 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
     be_activated   = False
     direction = entry_p = sl = tp = entry_idx = atr = None
     trail_activate_at = None
+    entry_pattern = ""
 
     for i in range(30, len(bars)):
         row = bars.iloc[i]
@@ -308,6 +311,7 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
                     "pnl_pips":  round(pnl_pips, 1),
                     "result":    result,
                     "forced":    False,
+                    "pattern":   entry_pattern,
                 })
                 if result == "LOSS":
                     cooldown_until = i + COOLDOWN_BARS
@@ -354,6 +358,7 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
         in_trade          = True
         direction         = bias
         entry_idx         = i
+        entry_pattern     = entry_result.get("pattern", "")
         be_activated      = False
         trailing_sl       = sl
         trail_distance    = atr * ind.ATR_SL_MULT

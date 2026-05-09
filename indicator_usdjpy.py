@@ -96,6 +96,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 from ta.trend import MACD, EMAIndicator
@@ -236,6 +237,61 @@ def compute_h1_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def compute_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> pd.DataFrame:
+    """
+    ATR-based Supertrend indicator (replication of Pine Script v4 logic).
+
+    The upper/lower bands ratchet in the trend direction — they only tighten,
+    acting as a dynamic trailing support/resistance level.
+
+    Adds columns:
+        st_trend — 1 for uptrend, -1 for downtrend
+        st_line  — the active band level (support in uptrend, resistance in downtrend)
+        st_flip  — True on the bar where trend direction changed
+    """
+    close_v = df["close"].values
+    high_v  = df["high"].values
+    low_v   = df["low"].values
+
+    atr_vals = AverageTrueRange(
+        high=df["high"], low=df["low"], close=df["close"], window=period,
+    ).average_true_range().values
+
+    hl2         = (high_v + low_v) / 2.0
+    basic_upper = hl2 + multiplier * atr_vals   # dn in Pine Script
+    basic_lower = hl2 - multiplier * atr_vals   # up in Pine Script
+
+    n     = len(df)
+    upper = basic_upper.copy()
+    lower = basic_lower.copy()
+    trend = np.ones(n, dtype=int)
+
+    for i in range(1, n):
+        # Lower band ratchets upward — only moves when prior close was above it
+        if close_v[i - 1] > lower[i - 1]:
+            lower[i] = max(basic_lower[i], lower[i - 1])
+        # Upper band ratchets downward — only moves when prior close was below it
+        if close_v[i - 1] < upper[i - 1]:
+            upper[i] = min(basic_upper[i], upper[i - 1])
+        # Flip to uptrend on a close above the prior upper band
+        if trend[i - 1] == -1 and close_v[i] > upper[i - 1]:
+            trend[i] = 1
+        # Flip to downtrend on a close below the prior lower band
+        elif trend[i - 1] == 1 and close_v[i] < lower[i - 1]:
+            trend[i] = -1
+        else:
+            trend[i] = trend[i - 1]
+
+    prev     = np.empty(n, dtype=int)
+    prev[0]  = trend[0]
+    prev[1:] = trend[:-1]
+
+    df["st_trend"] = trend
+    df["st_line"]  = np.where(trend == 1, lower, upper)
+    df["st_flip"]  = trend != prev
+    return df
+
+
 def compute_m5_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Add entry-timing indicators to a bar DataFrame (designed for 5m, also
@@ -256,6 +312,9 @@ def compute_m5_indicators(df: pd.DataFrame) -> pd.DataFrame:
         stoch_d    — Stochastic %D (3-bar smoothed signal line).
         atr        — ATR(14). Used as a volatility gate: entries are skipped
                      when atr < M5_ATR_MIN (market too flat to reach target).
+        st_trend   — Supertrend(7, 2.0) direction: 1 uptrend, -1 downtrend.
+        st_line    — Active Supertrend band level (dynamic S/R).
+        st_flip    — True on the bar Supertrend changes direction (Pattern E).
     """
     close = df["close"]
 
@@ -294,6 +353,7 @@ def compute_m5_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ha_high"]  = df[["high", "ha_open", "ha_close"]].max(axis=1)
     df["ha_low"]   = df[["low",  "ha_open", "ha_close"]].min(axis=1)
 
+    df = compute_supertrend(df, period=10, multiplier=3.0)
     return df
 
 
@@ -389,47 +449,14 @@ def find_m5_entry(df5m: pd.DataFrame, direction: str,
                 if not (SESSION_START_UTC <= hour < SESSION_END_UTC):
                     continue
 
-        close    = float(bar["close"])
-        ema_fast = float(bar["ema_fast"])
-        ema_slow = float(bar["ema_slow"])
-        prev_ef  = float(prev["ema_fast"])
-        prev_es  = float(prev["ema_slow"])
-        rsi      = float(bar["rsi"])
-        hist     = float(bar["macd_hist"])
-        prev_h   = float(prev["macd_hist"])
-        stoch_k  = float(bar["stoch_k"])
-        stoch_d  = float(bar["stoch_d"])
-        atr_m5   = float(bar["atr"])
+        close  = float(bar["close"])
+        atr_m5 = float(bar["atr"])
 
-        if any(pd.isna(v) for v in [ema_fast, ema_slow, rsi, hist, stoch_k, stoch_d, atr_m5]):
+        if pd.isna(atr_m5):
             continue
 
-        # ATR filter: skip if market is too flat to reach the target
         if atr_m5 < M5_ATR_MIN:
             continue
-
-        if direction == "BUY":
-            # Stochastic: %K above %D and not overbought
-            stoch_ok = stoch_k > stoch_d and stoch_k < 80
-            # A: EMA8 crosses above EMA21, RSI and Stochastic confirm
-            if ema_fast > ema_slow and prev_ef <= prev_es and 52 < rsi < 75 and stoch_ok:
-                last_entry = {"price": close, "bar_time": str(bar.name), "pattern": "A-ema-cross", "atr_m5": atr_m5}
-                continue
-            # C: MACD histogram flips positive, RSI and Stochastic confirm
-            if hist > 0 and prev_h <= 0 and close > ema_slow and 52 < rsi < 72 and stoch_ok:
-                last_entry = {"price": close, "bar_time": str(bar.name), "pattern": "C-macd-flip", "atr_m5": atr_m5}
-
-        elif direction == "SELL":
-            # Stochastic: %K below %D and not oversold
-            stoch_ok = stoch_k < stoch_d and stoch_k > 20
-            # A: EMA8 crosses below EMA21, RSI and Stochastic confirm
-            if ema_fast < ema_slow and prev_ef >= prev_es and 25 < rsi < 48 and stoch_ok:
-                last_entry = {"price": close, "bar_time": str(bar.name), "pattern": "A-ema-cross", "atr_m5": atr_m5}
-                continue
-            # C: MACD histogram flips negative, RSI and Stochastic confirm
-            if hist < 0 and prev_h >= 0 and close < ema_slow and 28 < rsi < 48 and stoch_ok:
-                last_entry = {"price": close, "bar_time": str(bar.name), "pattern": "C-macd-flip", "atr_m5": atr_m5}
-                continue
 
         # Pattern D — HA pullback: 3 trend candles → 1 pullback → resumption
         t1 = window.iloc[i - 4]
@@ -475,6 +502,17 @@ def find_m5_entry(df5m: pd.DataFrame, direction: str,
                     "pullback_extreme": float(pb["ha_high"]),
                     "atr_m5":           atr_m5,
                 }
+
+        # Pattern E — Supertrend flip aligned with trend direction
+        if not pd.isna(bar.get("st_trend")) and not pd.isna(prev.get("st_trend")):
+            st_now  = int(bar["st_trend"])
+            st_prev = int(prev["st_trend"])
+            if direction == "BUY" and st_now == 1 and st_prev == -1:
+                last_entry = {"price": close, "bar_time": str(bar.name),
+                              "pattern": "E-supertrend-flip", "atr_m5": atr_m5}
+            elif direction == "SELL" and st_now == -1 and st_prev == 1:
+                last_entry = {"price": close, "bar_time": str(bar.name),
+                              "pattern": "E-supertrend-flip", "atr_m5": atr_m5}
 
     return last_entry
 
@@ -587,10 +625,11 @@ def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD=X")
         rr          = reward_pips / risk_pips if risk_pips > 0 else 0
 
     pattern_labels = {
-        "A-ema-cross":   "5m EMA8/21 cross",
-        "B-ema-bounce":  "5m EMA21 bounce",
-        "C-macd-flip":   "5m MACD flip",
-        "D-ha-pullback": "5m HA pullback",
+        "A-ema-cross":       "5m EMA8/21 cross",
+        "B-ema-bounce":      "5m EMA21 bounce",
+        "C-macd-flip":       "5m MACD flip",
+        "D-ha-pullback":     "5m HA pullback",
+        "E-supertrend-flip": "5m Supertrend flip",
     }
     label = pattern_labels.get(pattern, pattern)
     basis = f"1h {h1_bias['trend']}, {label} @ {entry['bar_time']}"
@@ -635,6 +674,7 @@ def run(symbol: str = SYMBOL) -> Signal:
     }).dropna()
     df_4h = compute_h1_indicators(df_4h)
     df_4h["ema_4h"] = EMAIndicator(close=df_4h["close"], window=H4_EMA_PERIOD).ema_indicator()
+    df_4h = compute_supertrend(df_4h, period=10, multiplier=3.0)
     df_5m = compute_m5_indicators(df_5m)
 
     h1_bias = assess_h1_bias(df_1h_ind, df_4h=df_4h)

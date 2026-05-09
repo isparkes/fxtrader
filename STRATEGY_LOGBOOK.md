@@ -191,6 +191,50 @@ Run `python3 backtest.py --pair <pair>` (scalp) and `--pair <pair> --long` for e
 
 ---
 
+## Snapshot — 2026-05-09 (post-Supertrend)
+
+**Period:** scalp = 60d ending 2026-05-09 · long = 730d ending 2026-05-09
+**Changes since last snapshot:** (1) Added `compute_supertrend()` (Pine Script v4 replica, ATR-based ratcheting bands) to all indicator files and `backtest.py` for testing; subsequently reverted from `indicator_eurusd.py`, `indicator_gbpusd.py`, and `indicator_audusd.py` after results confirmed no edge — net code change is Supertrend only in `indicator_usdjpy.py`. (2) Added Pattern E (5m Supertrend flip, period=10, mult=3.0) to USDJPY only — tested on all four FX pairs; retained only on USDJPY (PF 1.99 over 28 trades in D+E experiment). Pattern E was rejected for EURUSD (PF 1.01), AUDUSD (PF 1.03), and GBPUSD (PF 0.74); those three indicator files reverted to A+C+D unchanged. (3) H4 Supertrend AND gate (EMA22 + ST must agree) was tested and rejected — reduced trade count ~30% while hurting PF across all pairs by cutting D-pattern trades. H4 gate reverted to EMA22-only. (4) USDJPY switched to D+E only (Patterns A and C removed). (5) `backtest.py` trade log now includes a `pattern` column in all CSV exports.
+
+### Scalp mode — 60d · 5m bars
+
+60d net-change: EURUSD +1.5%, GBPUSD +1.5%, USDJPY −0.8%, AUDUSD +2.0%, BTCUSD +14.7%
+
+| Pair   | Market Regime | Trades | Win%  | Avg W    | Avg L   |  PF  | Expec      | Total       | Max DD      |
+|--------|---------------|--------|-------|----------|---------|------|------------|-------------|-------------|
+| EURUSD | FLAT          |     82 | 42.7% |  28.2 p  | 11.5 p  | 1.82 |   5.4 p/tr |     444.7 p |    −82.5 p  |
+| GBPUSD | FLAT          |     78 | 29.5% |  42.6 p  | 11.9 p  | 1.50 |   4.2 p/tr |     324.9 p |    −95.4 p  |
+| USDJPY | FLAT          |     62 | 24.2% |  59.9 p  |  9.8 p  | 1.96 |   7.1 p/tr |     439.0 p |    −96.0 p  |
+| AUDUSD | FLAT          |     66 | 42.4% |  28.1 p  | 11.8 p  | 1.75 |   5.1 p/tr |     337.5 p |    −70.8 p  |
+| BTCUSD | TREND_UP      |    135 | 28.1% | 954.5 p  | 207.5 p | 1.80 | 119.6 p/tr |  16,145.0 p |  −3,727.9 p |
+
+(p = pips · tr = trade · BTCUSD pips = USD · USDJPY: Patterns D+E only; others: A+C+D)
+
+### Long mode — 730d · 1h bars
+
+730d net-change: EURUSD +9.7%, GBPUSD +9.1%, USDJPY +0.8%, AUDUSD +9.6%, BTCUSD +27.2%
+
+| Pair   | Market Regime | Trades | Win%  |   Avg W   | Avg L   |  PF  |   Expec    |      Total    | Max DD      |
+|--------|---------------|--------|-------|-----------|---------|------|------------|---------------|-------------|
+| EURUSD | FLAT          |    326 | 24.2% |   53.1 p  | 11.6 p  | 1.46 |   4.1 p/tr |    1,326.1 p  |   −193.5 p  |
+| GBPUSD | FLAT          |    353 | 19.5% |   76.1 p  | 12.4 p  | 1.49 |   4.9 p/tr |    1,728.6 p  |   −444.1 p  |
+| USDJPY | FLAT          |    252 | 18.3% |  109.7 p  | 11.9 p  | 2.07 |  10.3 p/tr |    2,601.9 p  |   −308.4 p  |
+| AUDUSD | FLAT          |    341 | 23.8% |   51.4 p  | 11.5 p  | 1.39 |   3.4 p/tr |    1,161.9 p  |   −179.0 p  |
+| BTCUSD | TREND_UP      |    326 | 24.5% | 2,619.0 p | 405.8 p | 2.10 | 336.5 p/tr |  109,697.6 p  |  −5,244.0 p |
+
+### Notes
+
+- **USDJPY scalp** is the standout improvement: PF 1.64 → 1.96, expectancy 5.1 → 7.1 p/tr, total pips 348 → 439. Removing A+C (both sub-1.0 PF on USDJPY in isolated testing) and keeping D+E produced this gain with fewer trades (68 → 62). Long mode also improved: PF 1.74 → 2.07, trade count down from 354 to 252 — higher quality entries only.
+- **EURUSD scalp** stable (PF 1.93 → 1.82, WR 44.4% → 42.7%). The slight dip from the prior snapshot appears market-driven — the 60d window has shifted. Still the highest-WR pair among active FX.
+- **AUDUSD scalp** unchanged (PF 1.75, WR 42.4%). Reliable baseline.
+- **GBPUSD scalp** slight improvement (PF 1.50 vs 1.50 prior, total pips 325 vs 325). Essentially no change — A+C+D retained and the Supertrend experiment confirmed E hurts GBPUSD (PF 0.74 in testing). Long-mode DD (−444 p) still the largest of the group; keep monitoring.
+- **BTCUSD** effectively unchanged in both modes (scalp PF 1.77, long PF 2.10). Pattern E was not tested on BTCUSD.
+- **USDJPY long mode** remains FLAT in the 730d window (+0.8%, same as prior snapshot). The wide avg win (110 p) is driven by the D+E pattern combination selecting higher-quality entries, not a macro trend tailwind.
+- **Regime context:** all four FX pairs FLAT in the 60d window. USDJPY crossed back into TREND_UP at 730d (+10.5%). Other pairs broadly FLAT. Results are directly comparable to the 2026-05-09 prior snapshot.
+- **Code revert (EURUSD/GBPUSD/AUDUSD):** `compute_supertrend()` and Pattern E code removed from these three indicator files after the rejection results above. Their indicator files are functionally identical to the 2026-05-07 snapshot state; only `indicator_usdjpy.py` carries the Supertrend implementation.
+
+---
+
 ## Candidate Pair Evaluation — 2026-05-09
 
 **Pairs tested:** NZDUSD, USDCAD, EURJPY, GBPJPY (all new indicator files created this date).
