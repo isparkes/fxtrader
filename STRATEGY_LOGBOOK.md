@@ -59,6 +59,10 @@ The regime is computed from Yahoo Finance daily closes at the start and end of t
 -
 ```
 
+## How to Add a Candidate Evaluation
+
+Run `python3 backtest.py --pair <pair>` (scalp) and `--pair <pair> --long` for each candidate. Compute 60d and 730d net price changes for regime labels. Append a `## Candidate Pair Evaluation` section with both tables sorted by PF, plus notes with a clear verdict (add / watch / skip) for each pair.
+
 ---
 
 ## Snapshot — 2026-05-03
@@ -184,5 +188,51 @@ The regime is computed from Yahoo Finance daily closes at the start and end of t
 - **USDJPY scalp** dipped (PF 1.74 → 1.64). The 730d regime dropped from TREND_UP back to FLAT (+0.8%) — the yen trend has unwound. Long-mode PF held (1.73 → 1.74), suggesting robustness across regimes.
 - **GBPUSD** broadly stable in both modes. Long-mode drawdown (−444 p) remains disproportionate to avg loss; no deterioration but continue to monitor.
 - **BTCUSD** essentially unchanged in both modes (scalp PF 1.76, long PF 2.10 vs 2.13 prior — within noise).
+
+---
+
+## Candidate Pair Evaluation — 2026-05-09
+
+**Pairs tested:** NZDUSD, USDCAD, EURJPY, GBPJPY (all new indicator files created this date).
+**Motivation:** explore whether the JPY-cross and commodity-pair dynamics produce a comparable edge to the active set.
+
+### Scalp mode — 60d · 5m bars (all FX pairs, sorted by PF)
+
+60d net-change: NZDUSD −1.1%, USDCAD +0.4%, EURJPY +1.9%, GBPJPY +2.4% (all FLAT)
+
+| Pair   | Market Regime | Trades | Win%  | Avg W   | Avg L   |  PF  | Expec      | Total      | Max DD       |
+|--------|---------------|--------|-------|---------|---------|------|------------|------------|--------------|
+| EURUSD | FLAT          |     82 | 42.7% |  28.2 p |  11.5 p | 1.82 |  5.4 p/tr  |    444.7 p |     −82.5 p  |
+| AUDUSD | FLAT          |     66 | 42.4% |  28.1 p |  11.8 p | 1.75 |  5.1 p/tr  |    337.5 p |     −70.8 p  |
+| USDJPY | FLAT          |     68 | 22.1% |  59.4 p |  10.2 p | 1.64 |  5.1 p/tr  |    348.1 p |    −105.0 p  |
+| GBPUSD | FLAT          |     78 | 29.5% |  42.6 p |  11.9 p | 1.50 |  4.2 p/tr  |    324.9 p |     −95.4 p  |
+| EURJPY | FLAT          |     82 | 22.0% |  52.3 p |  10.6 p | 1.38 |  3.2 p/tr  |    261.7 p |    −101.5 p  |
+| GBPJPY | FLAT          |     86 | 20.9% |  58.5 p |  15.3 p | 1.01 |  0.1 p/tr  |     12.2 p |    −588.2 p  |
+| USDCAD | FLAT          |     80 | 26.2% |  33.9 p |  12.1 p | 0.99 | −0.1 p/tr  |      −4.3 p |   −219.1 p  |
+| NZDUSD | FLAT          |     47 | 29.8% |  22.7 p |  12.5 p | 0.77 | −2.0 p/tr  |     −94.6 p |   −170.7 p  |
+
+(p = pips · tr = trade · active pairs shown for context with current-window stats)
+
+### Long mode — 730d · 1h bars (all FX pairs, sorted by PF)
+
+730d net-change: NZDUSD −3.3%, USDCAD +3.4% (FLAT); EURJPY +17.1%, GBPJPY +17.2% (TREND_UP)
+
+| Pair   | Market Regime | Trades | Win%  |  Avg W   | Avg L   |  PF  |   Expec    |    Total    | Max DD      |
+|--------|---------------|--------|-------|----------|---------|------|------------|-------------|-------------|
+| USDJPY | FLAT          |    354 | 16.9% | 104.3 p  |  12.3 p | 1.74 |  7.5 p/tr  |  2,652.1 p  |   −313.5 p  |
+| EURJPY | TREND_UP      |    406 | 14.3% | 121.5 p  |  12.9 p | 1.57 |  6.3 p/tr  |  2,568.2 p  |   −362.5 p  |
+| GBPJPY | TREND_UP      |    385 | 17.7% | 136.8 p  |  18.8 p | 1.56 |  8.7 p/tr  |  3,344.7 p  |   −523.7 p  |
+| GBPUSD | FLAT          |    354 | 19.5% |  76.1 p  |  12.4 p | 1.49 |  4.8 p/tr  |  1,715.4 p  |   −444.1 p  |
+| EURUSD | FLAT          |    326 | 24.2% |  53.1 p  |  11.6 p | 1.46 |  4.1 p/tr  |  1,326.1 p  |   −193.5 p  |
+| AUDUSD | TREND_UP      |    341 | 23.8% |  51.4 p  |  11.5 p | 1.39 |  3.4 p/tr  |  1,161.9 p  |   −179.0 p  |
+| USDCAD | FLAT          |    339 | 17.7% |  68.0 p  |  12.5 p | 1.17 |  1.7 p/tr  |    585.1 p  |   −407.2 p  |
+| NZDUSD | FLAT          |    317 | 24.0% |  44.2 p  |  12.2 p | 1.14 |  1.3 p/tr  |    409.6 p  |   −353.8 p  |
+
+### Notes
+
+- **EURJPY — add.** The only candidate that clears the bar in both modes: scalp PF 1.38 (+262 pips / 60d), long PF 1.57 (+2,568 pips / 730d). Drawdown is manageable (scalp −102 p, long −363 p) and consistent with GBPUSD which is already live. Behaves like USDJPY structurally — low win rate offset by very large avg wins when the trailing stop runs. The 730d TREND_UP regime (+17.1%) likely contributes to the above-average long-mode avg win (122 p); reassess if regime shifts to FLAT.
+- **GBPJPY — watch list.** Long-mode numbers are compelling (PF 1.56, best total pips +3,345) but the scalp-mode max drawdown (−588 pips in 60d) is an outlier — nearly 3× the next worst pair. Avg loss of 18.8 pips (vs 10–13 for all others) reflects the wider stop ceiling set for its higher ATR. The current 60d window was borderline (PF 1.01, +12 pips). Consider enabling only when a clear 1h trend is established; revisit next snapshot.
+- **USDCAD — skip for now.** Scalp barely breakeven (PF 0.99, −4 pips), long marginal (PF 1.17). A 2.0-pip spread consumes most of the edge. Could revisit with tighter broker spreads.
+- **NZDUSD — skip.** Weakest candidate in both modes (scalp PF 0.77, long PF 1.14). The 2.5-pip spread is too wide for the strategy's avg win at the 5m timeframe.
 
 ---

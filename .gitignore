@@ -3,4 +3,5 @@ __pycache__
 *backtest*.csv
 *.jsonl
 *.pine
-
+fxtrader.log
+cryptotrader.log

@@ -9,10 +9,12 @@ services:
       - /data/fxtrader/fx_trades.jsonl:/app/trades.jsonl
       - /data/fxtrader/fxtrader.log:/app/fxtrader.log
     # Override CMD to pass flags, e.g.:
-    #   command: ["--live"]                                  # enable Oanda order execution
-    #   command: ["--dry-run"]                               # log only, no emails or orders
-    #   command: ["--live", "--pair", "eurusd", "--interval", "60"]
+    #   command: ["--live"]                                       # enable Oanda order execution
+    #   command: ["--dry-run"]                                    # log only, no emails or orders
+    #   command: ["--live", "--pair", "eurusd", "usdjpy"]         # trade specific pairs (CLI)
+    #   command: ["--live", "--interval", "60"]
     #   command: ["--log-level", "DEBUG"]
+    # Or set FX_PAIRS=eurusd,usdjpy,audusd in .env to select pairs without rebuilding the image.
 
   cryptotrader:
     image: ${CRYPTOTRADER_IMAGE}

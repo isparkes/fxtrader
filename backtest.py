@@ -70,6 +70,10 @@ import indicator_gbpusd
 import indicator_usdjpy
 import indicator_audusd
 import indicator_btcusd
+import indicator_nzdusd
+import indicator_usdcad
+import indicator_eurjpy
+import indicator_gbpjpy
 
 PAIRS: dict[str, str] = {
     "eurusd": "EURUSD=X",
@@ -77,6 +81,10 @@ PAIRS: dict[str, str] = {
     "usdjpy": "USDJPY=X",
     "audusd": "AUDUSD=X",
     "btcusd": "BTC-USD",
+    "nzdusd": "NZDUSD=X",
+    "usdcad": "USDCAD=X",
+    "eurjpy": "EURJPY=X",
+    "gbpjpy": "GBPJPY=X",
 }
 
 PAIR_INDICATORS = {
@@ -85,6 +93,10 @@ PAIR_INDICATORS = {
     "usdjpy": indicator_usdjpy,
     "audusd": indicator_audusd,
     "btcusd": indicator_btcusd,
+    "nzdusd": indicator_nzdusd,
+    "usdcad": indicator_usdcad,
+    "eurjpy": indicator_eurjpy,
+    "gbpjpy": indicator_gbpjpy,
 }
 
 # ── Per-pair spread defaults ──────────────────────────────────────────────────
@@ -100,6 +112,8 @@ PAIR_CONFIG: dict[str, dict] = {
     "usdchf": {"spread_scalp": 2.0, "spread_long": 1.5},
     "nzdusd": {"spread_scalp": 2.5, "spread_long": 2.0},
     "eurgbp": {"spread_scalp": 1.5, "spread_long": 1.0},
+    "eurjpy": {"spread_scalp": 2.0, "spread_long": 1.5},
+    "gbpjpy": {"spread_scalp": 3.0, "spread_long": 2.0},
     # BTC: spread in dollars (pip_value=1.0); no session gate
     "btcusd": {"spread_scalp": 20, "spread_long": 15, "use_session": False},
 }

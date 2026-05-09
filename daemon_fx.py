@@ -118,6 +118,7 @@ load_dotenv()
 OANDA_RISK_PCT  = float(os.getenv("OANDA_RISK_PCT", "1"))    # percent of account, e.g. 1 = 1%, 0.8 = 0.8%
 FX_DATA_SOURCE  = os.getenv("FX_DATA_SOURCE", "yfinance").lower()
 FX_OCCULT_STOPS = os.getenv("FX_OCCULT_STOPS", "false").lower() == "true"
+FX_PAIRS_ENV    = os.getenv("FX_PAIRS", "").strip()          # e.g. "eurusd,usdjpy,audusd"
 
 # logsetup.configure() is called in __main__ once the CLI args are parsed,
 # so that --log-level can override the LOG_LEVEL env var before any logging happens.
@@ -1097,6 +1098,11 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
                 take_profit  = signal.take_profit,
                 occult_stops = occult_stops,
             )
+            if "orderFillTransaction" not in result:
+                cancel = result.get("orderCancelTransaction", {})
+                reject = result.get("orderRejectTransaction", {})
+                reason = cancel.get("reason") or reject.get("reason") or "no fill or reject transaction in response"
+                raise RuntimeError(f"Order rejected by broker — {reason}")
             trade_id = result["orderFillTransaction"]["tradeOpened"]["tradeID"]
             # Use actual fill price so logged risk_pips reflects reality.
             fill_str = result["orderFillTransaction"].get("price")
@@ -1141,6 +1147,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
                 "%s  Oanda order failed — signal discarded: %s",
                 pair.upper(), exc,
             )
+            state.last_signal_bar = entry["bar_time"]  # suppress retry on same bar
             return state  # don't track a position we couldn't open
 
     pos = Position(
@@ -1338,7 +1345,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--pair",
         choices=list(PAIRS.keys()),
-        help="Single pair to monitor (default: all pairs)",
+        nargs="+",
+        metavar="PAIR",
+        help="One or more pairs to monitor, e.g. --pair eurusd usdjpy "
+             "(default: FX_PAIRS env var, else all pairs)",
     )
     parser.add_argument(
         "--interval",
@@ -1378,11 +1388,17 @@ if __name__ == "__main__":
 
     logsetup.configure("fxtrader", level=args.log_level)
 
-    pairs_to_watch = (
-        [(args.pair, PAIRS[args.pair])]
-        if args.pair
-        else list(PAIRS.items())
-    )
+    if args.pair:
+        selected = args.pair
+    elif FX_PAIRS_ENV:
+        selected = [p.strip().lower() for p in FX_PAIRS_ENV.split(",") if p.strip()]
+        unknown  = [p for p in selected if p not in PAIRS]
+        if unknown:
+            parser.error(f"Unknown pair(s) in FX_PAIRS env var: {', '.join(unknown)}")
+    else:
+        selected = list(PAIRS.keys())
+
+    pairs_to_watch = [(p, PAIRS[p]) for p in selected]
 
     daemon_loop(pairs_to_watch, args.interval, args.dry_run, args.live,
                 args.occult_stops)
