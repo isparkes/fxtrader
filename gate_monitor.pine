@@ -1,0 +1,188 @@
+// This source code is subject to the Mozilla Public License 2.0
+// © FX Scalper Gate Monitor
+//@version=5
+indicator("FX Scalper — Gate Monitor", overlay = true)
+
+// ─── Inputs ───────────────────────────────────────────────────────────────────
+_auto_adx = str.contains(syminfo.ticker, "USDJPY") ?  0 :
+            str.contains(syminfo.ticker, "EURUSD") ? 17 :
+            str.contains(syminfo.ticker, "AUDUSD") ? 18 :
+            str.contains(syminfo.ticker, "GBPUSD") ? 25 : 20
+
+i_adx = input.int   (-1,          "Daily ADX threshold  (−1 = auto)",
+    tooltip = "Auto values — EURUSD: 17 · GBPUSD: 25 · USDJPY: 0 (exempt) · AUDUSD: 18",
+    minval = -1, maxval = 50)
+i_atr = input.float (2e-4,        "5m ATR floor (price units)")
+i_pos = input.string("top_right", "Table position",
+    options = ["top_right", "top_left", "bottom_right", "bottom_left"])
+
+adx_thr = i_adx >= 0 ? i_adx : _auto_adx
+
+// ─── Colors ───────────────────────────────────────────────────────────────────
+var C_G  = color.rgb(27,  94,  32,  0)   // deep green  — pass / bull
+var C_R  = color.rgb(183, 28,  28,  0)   // deep red    — fail / bear
+var C_A  = color.rgb(230, 81,  0,   0)   // amber       — flat / neutral
+var C_GR = color.rgb(55,  71,  79,  0)   // slate       — exempt / N/A
+var C_BG = color.rgb(13,  17,  23,  80)  // panel bg
+var C_HD = color.rgb(28,  35,  51,  55)  // header bg
+var C_SP = color.rgb(17,  24,  39,  65)  // separator bg
+var C_W  = color.white
+var C_DM = color.new(color.white, 48)    // dimmed text
+
+// ─── ADX (Wilder, manual — robust across broker feeds) ───────────────────────
+f_adx() =>
+    up   = ta.change(high)
+    dn   = -ta.change(low)
+    pdm  = na(up) ? na : up > dn and up > 0 ? up : 0.0
+    ndm  = na(dn) ? na : dn > up and dn > 0 ? dn : 0.0
+    tr14 = ta.rma(ta.tr(true), 14)
+    pdi  = 100.0 * ta.rma(pdm, 14) / tr14
+    ndi  = 100.0 * ta.rma(ndm, 14) / tr14
+    100.0 * ta.rma(math.abs(pdi - ndi) / math.max(pdi + ndi, 1e-10), 14)
+
+// ─── MACD histogram (12/26/9) ─────────────────────────────────────────────────
+f_hist() =>
+    fast = ta.ema(close, 12)
+    slow = ta.ema(close, 26)
+    fast - slow - ta.ema(fast - slow, 9)
+
+// ─── Multi-timeframe data ─────────────────────────────────────────────────────
+d_adx    = request.security(syminfo.tickerid, "D",   f_adx())
+h4_cls   = request.security(syminfo.tickerid, "240", close)
+h4_ema22 = request.security(syminfo.tickerid, "240", ta.ema(close, 22))
+h1_cls   = request.security(syminfo.tickerid, "60",  close)
+h1_ema50 = request.security(syminfo.tickerid, "60",  ta.ema(close, 50))
+h1_rsi   = request.security(syminfo.tickerid, "60",  ta.rsi(close, 14))
+h1_hist      = request.security(syminfo.tickerid, "60",  f_hist())
+h1_hist_prev = request.security(syminfo.tickerid, "60",  f_hist()[1])
+
+m5_atr   = ta.atr(14)
+
+// ─── Session gate (UTC) ───────────────────────────────────────────────────────
+utc_h   = hour(time, "UTC")
+in_sess = utc_h >= 7 and utc_h < 16
+
+// ─── Gate states ─────────────────────────────────────────────────────────────
+g_sess = in_sess
+g_atr  = m5_atr  >= i_atr
+g_adx  = adx_thr == 0 or d_adx >= adx_thr
+
+// Directional: +1 bull, −1 bear, 0 neutral
+dir_h4   = h4_cls  > h4_ema22 ?  1 : -1
+dir_ema  = h1_cls  > h1_ema50 ?  1 : -1
+dir_macd = h1_hist > 0 and h1_hist > h1_hist_prev ?  1 :
+           h1_hist < 0 and h1_hist < h1_hist_prev ? -1 : 0
+dir_rsi  = h1_rsi  > 50       ?  1 : h1_rsi  < 50 ? -1 : 0
+
+// 1h composite bias: all three must agree
+h1_bias = dir_ema == 1 and dir_macd == 1 and dir_rsi == 1 ?  1 :
+          dir_ema ==-1 and dir_macd ==-1 and dir_rsi ==-1 ? -1 : 0
+
+// Overall: 1h bias ∩ 4h alignment ∩ ADX ∩ ATR ∩ session
+overall = h1_bias == 0                  ? 0 :
+          h1_bias == 1 and dir_h4 != 1  ? 0 :
+          h1_bias ==-1 and dir_h4 !=-1  ? 0 :
+          not g_adx                     ? 0 :
+          not g_atr                     ? 0 :
+          not g_sess                    ? 0 :
+          h1_bias
+
+// ─── Colour helpers ───────────────────────────────────────────────────────────
+bc(p) => p ? C_G : C_R
+dc(d) => d == 1 ? C_G : d == -1 ? C_R : C_A
+ds(d) => d == 1 ? "▲  BUY" : d == -1 ? "▼  SELL" : "●  FLAT"
+
+// ─── Table ───────────────────────────────────────────────────────────────────
+_tp = i_pos == "top_right"    ? position.top_right    :
+      i_pos == "top_left"     ? position.top_left     :
+      i_pos == "bottom_right" ? position.bottom_right : position.bottom_left
+
+var table T = table.new(_tp, 3, 12,
+    bgcolor      = C_BG,
+    border_color = color.new(color.white, 82), border_width = 1,
+    frame_color  = color.new(color.white, 60), frame_width  = 1)
+
+// ─── Cell helpers (reference T via closure) ───────────────────────────────────
+r_hdr(c, txt, ha) =>
+    table.cell(T, c, 0, txt,
+        text_color = C_W, text_size = size.small, bgcolor = C_HD, text_halign = ha)
+
+r_row(r, lbl, dot_bg, val, vc) =>
+    table.cell(T, 0, r, "  " + lbl,
+        text_color = C_DM, text_size = size.small, bgcolor = C_BG, text_halign = text.align_left)
+    table.cell(T, 1, r, "  ●  ",
+        text_color = C_W,  text_size = size.small, bgcolor = dot_bg, text_halign = text.align_center)
+    table.cell(T, 2, r, val + "  ",
+        text_color = vc,   text_size = size.small, bgcolor = C_BG, text_halign = text.align_right)
+
+r_sep(r) =>
+    table.cell(T, 0, r, "", bgcolor = C_SP, text_size = size.tiny)
+    table.cell(T, 1, r, "", bgcolor = C_SP, text_size = size.tiny)
+    table.cell(T, 2, r, "", bgcolor = C_SP, text_size = size.tiny)
+
+// ─── Render (last bar only) ───────────────────────────────────────────────────
+if barstate.islast
+
+    // Header
+    r_hdr(0, "  Gate",   text.align_left)
+    r_hdr(1, "",         text.align_center)
+    r_hdr(2, "Value  ",  text.align_right)
+
+    // ── Binary gates ────────────────────────────────────────────────────────
+    r_row(1, "Session",
+        bc(g_sess),
+        in_sess ? "07-16 UTC  ✓" : str.tostring(utc_h) + "h UTC  ✗",
+        g_sess ? C_G : C_R)
+
+    r_row(2, "5m ATR",
+        bc(g_atr),
+        str.tostring(m5_atr, "#.00000"),
+        g_atr ? C_G : C_R)
+
+    _adx_bg = adx_thr == 0 ? C_GR : bc(g_adx)
+    _adx_s  = adx_thr == 0 ? "EXEMPT" :
+              str.tostring(math.round(d_adx, 1)) + "  /  " + str.tostring(adx_thr)
+    _adx_vc = adx_thr == 0 ? C_DM : g_adx ? C_G : C_R
+    r_row(3, "Daily ADX", _adx_bg, _adx_s, _adx_vc)
+
+    r_sep(4)
+
+    // ── Directional gates ────────────────────────────────────────────────────
+    r_row(5, "4h EMA22",
+        dc(dir_h4),
+        dir_h4 == 1 ? "▲ above" : "▼ below",
+        dc(dir_h4))
+
+    r_row(6, "1h EMA50",
+        dc(dir_ema),
+        dir_ema == 1 ? "▲ above" : "▼ below",
+        dc(dir_ema))
+
+    _macd_arrow = h1_hist > h1_hist_prev ? " ↑" : " ↓"
+    r_row(7, "1h MACD hist",
+        dc(dir_macd),
+        str.tostring(h1_hist, "#.000000") + _macd_arrow,
+        dc(dir_macd))
+
+    r_row(8, "1h RSI(14)",
+        dc(dir_rsi),
+        str.tostring(math.round(h1_rsi, 1)),
+        dc(dir_rsi))
+
+    r_sep(9)
+
+    r_row(10, "1h Bias",
+        dc(h1_bias),
+        ds(h1_bias),
+        dc(h1_bias))
+
+    // ── Overall — full-width merged row ──────────────────────────────────────
+    _ov_c = dc(overall)
+    _ov_s = overall == 1 ? "▲   B U Y   ▲" : overall == -1 ? "▼   S E L L   ▼" : "●   F L A T   ●"
+    table.cell(T, 0, 11, _ov_s,
+        text_color = C_W, text_size = size.normal, bgcolor = _ov_c, text_halign = text.align_center)
+    table.cell(T, 1, 11, "", bgcolor = _ov_c)
+    table.cell(T, 2, 11, "", bgcolor = _ov_c)
+    table.merge_cells(T, 0, 11, 2, 11)
+
+plot(na)
