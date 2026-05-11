@@ -102,7 +102,6 @@ PAIR_INDICATORS = {
 # ── Per-pair spread defaults ──────────────────────────────────────────────────
 # spread_scalp: typical spread in pips for 5m scalp mode
 # spread_long:  slightly tighter spread assumed for 1h long mode
-# use_session:  False for 24/7 instruments like BTC
 PAIR_CONFIG: dict[str, dict] = {
     "eurusd": {"spread_scalp": 1.5, "spread_long": 1.0},
     "gbpusd": {"spread_scalp": 1.8, "spread_long": 1.2},
@@ -173,7 +172,7 @@ def merge_trend(df_h1: pd.DataFrame, df_5m: pd.DataFrame) -> pd.DataFrame:
     return merged
 
 
-def fetch_data(symbol: str, ind) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def fetch_data(symbol: str, ind) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Scalp mode: 1h trend + 4h filter (Measure 4) + 5m entry bars (~60 days)."""
     df_h1 = yf.download(symbol, interval="1h", period="60d", progress=False, auto_adjust=True)
     df_h1 = flatten_columns(df_h1)
@@ -194,7 +193,13 @@ def fetch_data(symbol: str, ind) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFra
     df_5m.dropna(inplace=True)
     df_5m = ind.compute_m5_indicators(df_5m)
 
-    return df_h1, df_4h, df_5m
+    df_1d = yf.download(symbol, interval="1d", period="90d", progress=False, auto_adjust=True)
+    df_1d = flatten_columns(df_1d)
+    df_1d.dropna(inplace=True)
+    if hasattr(ind, "compute_daily_adx"):
+        df_1d = ind.compute_daily_adx(df_1d)
+
+    return df_h1, df_4h, df_5m, df_1d
 
 
 def fetch_data_long(symbol: str, ind) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -217,7 +222,8 @@ def fetch_data_long(symbol: str, ind) -> tuple[pd.DataFrame, pd.DataFrame]:
 def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
                  bar_mins: int = 5, spread_pips: float = SPREAD_PIPS,
                  use_session: bool = True, symbol: str = "EURUSD=X",
-                 ind=None, df_4h: Optional[pd.DataFrame] = None) -> list[dict]:
+                 ind=None, df_4h: Optional[pd.DataFrame] = None,
+                 df_1d: Optional[pd.DataFrame] = None) -> list[dict]:
     """
     Walk forward through the merged entry bars, simulating trades.
 
@@ -249,6 +255,14 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
         df_4h = df_4h.copy()
         df_4h.index = _to_utc(df_4h.index)
     h4_times = df_4h.index if df_4h is not None else None
+
+    # Normalise 1d index for daily ADX slicing (None = gate disabled)
+    if df_1d is not None and "adx" in df_1d.columns:
+        df_1d = df_1d.copy()
+        df_1d.index = _to_utc(df_1d.index)
+    else:
+        df_1d = None
+    d_times = df_1d.index if df_1d is not None else None
 
     pv = ind.pip_value(symbol)
 
@@ -332,7 +346,14 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
         if h4_times is not None:
             h4_end      = h4_times.searchsorted(ts, side="right")
             df_4h_slice = df_4h.iloc[:h4_end] if h4_end > 0 else None
-        bias_info = ind.assess_h1_bias(df_h1.iloc[:h1_end], df_4h=df_4h_slice)
+        df_1d_slice = None
+        if d_times is not None:
+            d_end       = d_times.searchsorted(ts, side="right")
+            df_1d_slice = df_1d.iloc[:d_end] if d_end > 0 else None
+        if hasattr(ind, "DAILY_ADX_MIN"):
+            bias_info = ind.assess_h1_bias(df_h1.iloc[:h1_end], df_4h=df_4h_slice, df_1d=df_1d_slice)
+        else:
+            bias_info = ind.assess_h1_bias(df_h1.iloc[:h1_end], df_4h=df_4h_slice)
         bias = bias_info["direction"]
         if bias == "FLAT":
             continue
@@ -560,10 +581,10 @@ if __name__ == "__main__":
                 report(trades, bar_mins=60, pair_label=pair_label,
                        account=args.account, risk_pct=args.risk)
             else:
-                df_trend, df_4h, df_entry = fetch_data(symbol, ind)
+                df_trend, df_4h, df_entry, df_1d = fetch_data(symbol, ind)
                 trades = run_backtest(df_trend, df_entry, bar_mins=5,
                                       spread_pips=cfg["spread_scalp"], use_session=use_sess,
-                                      symbol=symbol, ind=ind, df_4h=df_4h)
+                                      symbol=symbol, ind=ind, df_4h=df_4h, df_1d=df_1d)
                 report(trades, bar_mins=5, pair_label=pair_label,
                        account=args.account, risk_pct=args.risk)
             all_results.append((pair_label, trades))
@@ -585,9 +606,9 @@ if __name__ == "__main__":
                    account=args.account, risk_pct=args.risk)
         else:
             console.print(f"[bold cyan]Running {pair_label} Scalper backtest (scalp mode · 60d · 5m bars)...[/]")
-            df_trend, df_4h, df_entry = fetch_data(symbol, ind)
+            df_trend, df_4h, df_entry, df_1d = fetch_data(symbol, ind)
             trades = run_backtest(df_trend, df_entry, bar_mins=5,
                                   spread_pips=cfg["spread_scalp"], use_session=use_sess,
-                                  symbol=symbol, ind=ind, df_4h=df_4h)
+                                  symbol=symbol, ind=ind, df_4h=df_4h, df_1d=df_1d)
             report(trades, bar_mins=5, pair_label=pair_label,
                    account=args.account, risk_pct=args.risk)

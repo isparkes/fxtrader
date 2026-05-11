@@ -98,7 +98,7 @@ from typing import Optional
 
 import pandas as pd
 import yfinance as yf
-from ta.trend import MACD, EMAIndicator
+from ta.trend import MACD, EMAIndicator, ADXIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import AverageTrueRange
 from rich.console import Console
@@ -134,6 +134,9 @@ H1_RSI_PERIOD  = 14
 
 # 4h trend filter (Measure 4)
 H4_EMA_PERIOD = 22
+
+# Daily regime gate — skip when daily ADX < threshold (ranging market)
+DAILY_ADX_MIN = 18
 
 # 5m entry
 M5_EMA_FAST      = 8
@@ -236,6 +239,12 @@ def compute_h1_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def compute_daily_adx(df: pd.DataFrame) -> pd.DataFrame:
+    adx = ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=14)
+    df["adx"] = adx.adx()
+    return df
+
+
 def compute_m5_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Add entry-timing indicators to a bar DataFrame (designed for 5m, also
@@ -297,7 +306,8 @@ def compute_m5_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def assess_h1_bias(df: pd.DataFrame, df_4h: Optional[pd.DataFrame] = None) -> dict:
+def assess_h1_bias(df: pd.DataFrame, df_4h: Optional[pd.DataFrame] = None,
+                   df_1d: Optional[pd.DataFrame] = None) -> dict:
     """
     Evaluate the trend gates on the last completed 1h bar and return
     the directional bias together with the raw indicator values.
@@ -329,10 +339,12 @@ def assess_h1_bias(df: pd.DataFrame, df_4h: Optional[pd.DataFrame] = None) -> di
     atr       = float(last["atr"])
     h1_rsi    = float(last["rsi"])
 
+    prev_macd = float(df.iloc[-2]["macd_hist"]) if len(df) >= 2 else macd_hist
+
     above = close > ema_trend
     below = close < ema_trend
-    bull  = macd_hist > 0 and h1_rsi > 50
-    bear  = macd_hist < 0 and h1_rsi < 50
+    bull  = macd_hist > 0 and macd_hist > prev_macd and h1_rsi > 50
+    bear  = macd_hist < 0 and macd_hist < prev_macd and h1_rsi < 50
 
     if above and bull:
         direction = "BUY"
@@ -347,6 +359,11 @@ def assess_h1_bias(df: pd.DataFrame, df_4h: Optional[pd.DataFrame] = None) -> di
         if direction == "BUY" and not h4_above:
             direction = "FLAT"
         elif direction == "SELL" and h4_above:
+            direction = "FLAT"
+
+    if direction != "FLAT" and df_1d is not None and len(df_1d) >= 14:
+        adx_val = df_1d.iloc[-1].get("adx")
+        if adx_val is not None and not pd.isna(adx_val) and float(adx_val) < DAILY_ADX_MIN:
             direction = "FLAT"
 
     return {
@@ -637,7 +654,10 @@ def run(symbol: str = SYMBOL) -> Signal:
     df_4h["ema_4h"] = EMAIndicator(close=df_4h["close"], window=H4_EMA_PERIOD).ema_indicator()
     df_5m = compute_m5_indicators(df_5m)
 
-    h1_bias = assess_h1_bias(df_1h_ind, df_4h=df_4h)
+    df_1d = fetch_ohlcv(symbol, interval="1d", period="90d")
+    df_1d = compute_daily_adx(df_1d)
+
+    h1_bias = assess_h1_bias(df_1h_ind, df_4h=df_4h, df_1d=df_1d)
     entry   = find_m5_entry(df_5m, h1_bias["direction"])
     signal  = build_signal(h1_bias, entry, symbol)
 
