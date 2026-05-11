@@ -123,6 +123,11 @@ docker build --platform linux/amd64 -f Dockerfile.fx -t iansparkes/fxtrader:1.0.
 > `--no-binary` flag — cross-compilation has no C compiler available and the
 > source build will fail.
 
+Build and upload:
+```export VERSION=1.1.17
+TARVERSION=`echo $VERSION | tr -d "."`;docker build -f Dockerfile.fx --platform linux/amd64 -t iansparkes/fxtrader:$VERSION .;docker build -f Dockerfile.crypto --platform linux/amd64 -t iansparkes/cryptotrader:$VERSION .;docker save -o fx$TARVERSION.tar iansparkes/fxtrader:$VERSION;docker save -o crypto$TARVERSION.tar iansparkes/cryptotrader:$VERSION;scp fx$TARVERSION.tar ian@tcdbhp:/data/fxtrader;scp crypto$TARVERSION.tar ian@tcdbhp:/data/fxtrader;
+```
+
 ### Run with Docker Compose (recommended)
 
 `docker-compose.yml` defines two services — `fxtrader` and `cryptotrader` —

@@ -890,17 +890,18 @@ def _start_control_server(
 def _calc_units(pair: str, risk_pips: float) -> int:
     """
     Return the number of units to trade so that `risk_pips` of adverse movement
-    equals exactly OANDA_RISK_PCT percent of the current account balance.
+    equals exactly OANDA_RISK_PCT percent of the current account NAV.
 
     For JPY pairs the pip is in JPY, so we convert to USD using the live rate.
     """
     try:
-        balance = float(oanda.get_account_summary()["balance"])
+        acct    = oanda.get_account_summary()
+        nav     = float(acct["NAV"])
     except Exception as exc:
-        log.warning("Could not fetch account balance for sizing (%s) — using 10 000 fallback", exc)
-        balance = 10_000.0
+        log.warning("Could not fetch account NAV for sizing (%s) — using 10 000 fallback", exc)
+        nav = 10_000.0
 
-    risk_usd = balance * OANDA_RISK_PCT / 100
+    risk_usd = nav * OANDA_RISK_PCT / 100
     pip_size = PAIR_INDICATORS[pair].pip_value(pair)
 
     if pair == "usdjpy":
