@@ -237,11 +237,12 @@ matching live trading where waiting for close is impractical.
 | Gate | BUY condition | SELL condition |
 |---|---|---|
 | EMA50 side | Close above EMA(50) | Close below EMA(50) |
-| MACD histogram sign | Positive | Negative |
+| MACD histogram — building | Positive **and increasing** vs prior bar | Negative **and decreasing** vs prior bar |
 | RSI(14) | > 50 | < 50 |
 
-All three must agree simultaneously. If any gate fails the bias is `FLAT` and
-no entry is taken.
+All three must agree simultaneously. The MACD gate requires momentum to be
+accelerating, not merely present — a positive-but-fading histogram is treated
+as `FLAT` and no entry is taken.
 
 ### 4h agreement gate — Measure 4
 
@@ -254,6 +255,21 @@ higher-timeframe structure.
 | Gate | BUY condition | SELL condition |
 |---|---|---|
 | 4h EMA(22) side | 4h close above 4h EMA(22) | 4h close below 4h EMA(22) |
+
+### Daily ADX gate
+
+After the 4h EMA22 gate, a daily ADX(14) check suppresses all entries on days
+where the market lacks directional conviction. The threshold is tuned per pair.
+USDJPY is exempt because Pattern D and E already self-select trending conditions.
+
+| Pair | `DAILY_ADX_MIN` | Notes |
+|---|---|---|
+| EURUSD | 17 | |
+| GBPUSD | 25 | Most aggressive — suits the weakest pair |
+| USDJPY | 0 (exempt) | Supertrend/HA patterns self-select trending days |
+| AUDUSD | 18 | |
+
+The daily gate is applied in scalp mode only; it is not applied in `--long` mode.
 
 ### SL/TP sizing
 
@@ -299,6 +315,18 @@ Stop loss is anchored to the pullback candle's extreme ± a buffer, then
 clamped within `HA_SL_MIN_PIPS`–`HA_SL_MAX_PIPS`. If the clamped stop
 produces R:R < 1.5 the signal is suppressed. No additional RSI or Stochastic
 guards — the HA sequence itself provides the quality filter.
+
+**Pattern E — Supertrend flip (USDJPY only)**
+
+| Direction | Trigger |
+|---|---|
+| BUY | 5m Supertrend (period=10, mult=3.0) flips from downtrend to uptrend |
+| SELL | 5m Supertrend flips from uptrend to downtrend |
+
+Entry is taken on the bar where the Supertrend direction changes, provided the
+flip is aligned with the 1h bias. Uses the same ATR-based SL/TP as Pattern D.
+USDJPY runs Patterns D+E only — Patterns A and C were removed after isolated
+testing showed sub-1.0 PF for each on that pair.
 
 ### Risk management
 
@@ -355,6 +383,12 @@ independently per pair.
 | Stochastic | `M5_STOCH_PERIOD / SMOOTH` | 14 / 3 |
 | ATR floor | `M5_ATR_MIN` | 0.0002 (FX) / 50.0 (BTC) |
 
+**Daily regime gate**
+
+| Parameter | Constant | EURUSD | GBPUSD | USDJPY | AUDUSD |
+|---|---|---|---|---|---|
+| Daily ADX floor | `DAILY_ADX_MIN` | 17 | 25 | 0 (exempt) | 18 |
+
 **Risk**
 
 | Parameter | Constant | EURUSD / GBPUSD / AUDUSD | USDJPY | BTCUSD |
@@ -363,7 +397,7 @@ independently per pair.
 | Take profit multiplier | `ATR_TP_MULT` | 3.0 | 3.0 | 3.0 |
 | Pattern D — SL buffer | `HA_SL_BUFFER_PIPS` | 2 pips | 2 pips | $50 |
 | Minimum SL — all patterns | `HA_SL_MIN_PIPS` | 10 pips | 7 pips | $200 |
-| Pattern D — SL ceiling | `HA_SL_MAX_PIPS` | 12 pips | 12 pips | $800 |
+| Pattern D / E — SL ceiling | `HA_SL_MAX_PIPS` | 12 pips | 12 pips | $800 |
 | Breakeven trigger | `TRAIL_ACTIVATE_FRAC` | 0.7 (EURUSD) / 0.8 | 0.8 | 0.8 |
 
 ---
@@ -425,7 +459,7 @@ Prints a summary table:
 
 Saves the full trade-by-trade log to `{pair}_backtest_trades.csv` with columns:
 `direction`, `entry`, `exit`, `sl`, `tp`, `held_bars`, `held_mins`,
-`pnl_pips`, `result`, `forced`.
+`pnl_pips`, `result`, `forced`, `pattern`.
 
 Optionally pass `--account` and `--risk` to show position sizing alongside
 each trade:
@@ -446,8 +480,9 @@ constants in the *Tunable parameters* block near the top:
 ATR_SL_MULT        = 0.4    # widen or tighten the stop
 ATR_TP_MULT        = 3.0    # adjust the TP ceiling
 M5_ATR_MIN         = 0.0002 # raise to filter quieter sessions
-HA_SL_MIN_PIPS     = 10     # Pattern D — tightest allowed stop
+HA_SL_MIN_PIPS     = 10     # Pattern D/E — tightest allowed stop
 TRAIL_ACTIVATE_FRAC = 0.7   # move to breakeven at 70% of TP
+DAILY_ADX_MIN      = 17     # suppress entries on low-ADX days (0 = exempt)
 ```
 
 Changes are picked up automatically by `daemon_fx.py` and `backtest.py` on
@@ -484,27 +519,32 @@ Results use the forming-bar approach: the trend bias reads `iloc[-1]` (current
 forming 4h bar), matching live trading where waiting for bar close is
 impractical at the 5m/1h entry timeframe.
 
-### Scalp mode — 60 days · 5m bars (as of 2026-04-19)
+### Scalp mode — 60 days · 5m bars (as of 2026-05-11)
+
+Active gates: 1h EMA50 + building MACD + RSI; 4h EMA22; daily ADX; session gate (07:00–16:00 UTC).
+USDJPY uses Patterns D+E only; EURUSD/GBPUSD/AUDUSD use Patterns A+C+D.
 
 | Pair | Trades | Win % | Avg Win | Avg Loss | Prof. Factor | Expectancy | Total | Max DD | Unit |
 |---|---|---|---|---|---|---|---|---|---|
-| EURUSD | 111 | 25.2% | 32.1 | 7.8 | **1.40** | +2.3 | +255.5 | -175.7 | pips |
-| USDJPY | 91 | 20.9% | 55.9 | 10.4 | **1.42** | +3.5 | +316.0 | -115.2 | pips |
-| AUDUSD | 81 | 29.6% | 30.7 | 8.5 | **1.52** | +3.1 | +251.1 | -89.9 | pips |
-| GBPUSD | 99 | 19.2% | 48.2 | 9.5 | **1.21** | +1.6 | +157.2 | -103.7 | pips |
-| BTCUSD | 146 | 26.0% | 1114.5 | 227.5 | **1.72** | +121.8 | +17,781 | -3,295 | USD |
+| EURUSD | 54 | 53.7% | 29.8 | 11.5 | **3.01** | +10.7 | +577 | -35 | pips |
+| USDJPY | 45 | 31.1% | 60.4 | 9.5 | **2.86** | +12.2 | +550 | -65 | pips |
+| AUDUSD | 52 | 50.0% | 29.1 | 11.8 | **2.45** | +8.6 | +448 | -47 | pips |
+| GBPUSD | 39 | 33.3% | 51.5 | 11.9 | **2.16** | +9.2 | +359 | -60 | pips |
+| BTCUSD | 131 | 27.5% | 950 | 207 | **1.74** | +111 | +14,569 | -3,728 | USD |
 
-### Long mode — 730 days · 1h bars (as of 2026-04-19)
+### Long mode — 730 days · 1h bars (as of 2026-05-09)
+
+Daily ADX gate not applied in long mode. USDJPY uses Patterns D+E only.
 
 | Pair | Trades | Win % | Avg Win | Avg Loss | Prof. Factor | Expectancy | Total | Max DD | Unit |
 |---|---|---|---|---|---|---|---|---|---|
-| EURUSD | 329 | 23.7% | 53.7 | 10.8 | **1.54** | +4.5 | +1469.7 | -183.2 | pips |
-| USDJPY | 332 | 21.4% | 112.4 | 16.1 | **1.90** | +11.4 | +3770.0 | -208.7 | pips |
-| GBPUSD | 355 | 20.0% | 77.1 | 12.6 | **1.53** | +5.4 | +1904.3 | -518.5 | pips |
-| AUDUSD | 346 | 21.4% | 50.7 | 10.0 | **1.38** | +3.0 | +1033.9 | -159.2 | pips |
-| BTCUSD | — | — | — | — | **2.12** | — | — | — | USD |
+| USDJPY | 252 | 18.3% | 109.7 | 11.9 | **2.07** | +10.3 | +2,602 | -308 | pips |
+| EURUSD | 326 | 24.2% | 53.1 | 11.6 | **1.46** | +4.1 | +1,326 | -194 | pips |
+| GBPUSD | 353 | 19.5% | 76.1 | 12.4 | **1.49** | +4.9 | +1,729 | -444 | pips |
+| AUDUSD | 341 | 23.8% | 51.4 | 11.5 | **1.39** | +3.4 | +1,162 | -179 | pips |
+| BTCUSD | 326 | 24.5% | 2,619 | 406 | **2.10** | +337 | +109,698 | -5,244 | USD |
 
-All five instruments are profitable in both modes. BTCUSD has the strongest
-profit factor in scalp mode (1.72) and long mode (2.12). USDJPY shows the
-best pip edge in long mode (PF 1.90, +3770 pips). GBPUSD has the largest
-drawdown relative to total gain in long mode and warrants monitoring.
+All five instruments are profitable in both modes. EURUSD leads the active FX
+pairs in scalp mode (PF 3.01, 53.7% WR). USDJPY leads in long mode (PF 2.07).
+BTCUSD has the strongest scalp PF among all instruments after EURUSD. GBPUSD
+has the largest long-mode drawdown relative to total gain and warrants monitoring.

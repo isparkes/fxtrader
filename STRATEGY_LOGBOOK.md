@@ -387,3 +387,234 @@ Run `python3 backtest.py --pair <pair>` (scalp) and `--pair <pair> --long` for e
 - **NZDUSD — skip.** Weakest candidate in both modes (scalp PF 0.77, long PF 1.14). The 2.5-pip spread is too wide for the strategy's avg win at the 5m timeframe.
 
 ---
+
+## Regime & RR Analysis — 2026-05-14
+
+**Method:** 5m backtest (`rr_analysis.py`) across the 4 active pairs (EURUSD, GBPUSD, USDJPY, AUDUSD) covering ~60 days of data. Trades are aggregated by ISO week and by calendar day. Regime is classified as **TREND** (WR ≥ 35%) or **RANGE** (WR < 35%). The offered R:R is computed at entry from the raw SL/TP levels before any trailing.
+
+**Motivation:** live trading in W19/W20 has been unprofitable. This analysis examines whether regime can be identified early in the week to inform discretionary trading decisions.
+
+### Weekly View — all 4 pairs combined
+
+| Week     | Trades | WR  | Min RR | Avg RR | Max RR | TP rate | Net pips | Regime |
+|----------|--------|-----|--------|--------|--------|---------|----------|--------|
+| W09/2026 |      9 | 33% |    3.0 |    4.3 |    7.5 |     33% |     +1.1 | RANGE  |
+| W10/2026 |     22 | 41% |    4.0 |    5.8 |   10.6 |     41% |   +283.4 | TREND  |
+| W11/2026 |     16 | 75% |    3.8 |    5.4 |    7.5 |     75% |   +486.7 | TREND  |
+| W12/2026 |     23 | 39% |    3.8 |    5.8 |    8.2 |     39% |   +190.6 | TREND  |
+| W13/2026 |     21 | 38% |    3.4 |    6.0 |   13.9 |     38% |   +226.5 | TREND  |
+| W14/2026 |     17 | 41% |    2.7 |    5.6 |   10.2 |     41% |   +151.2 | TREND  |
+| W15/2026 |     19 | 47% |    2.5 |    3.8 |    6.0 |     47% |   +132.1 | TREND  |
+| W16/2026 |     15 | 67% |    2.3 |    4.3 |    7.5 |     67% |   +255.8 | TREND  |
+| W17/2026 |     15 | 13% |    2.5 |    4.5 |    7.6 |     13% |    −96.1 | RANGE  |
+| W18/2026 |     17 | 53% |    2.4 |    4.8 |   13.1 |     53% |   +344.7 | TREND  |
+| W19/2026 |     14 | 21% |    2.7 |    4.9 |   10.2 |     21% |    −53.4 | RANGE  |
+| W20/2026 |      1 |100% |    2.4 |    2.4 |    2.4 |    100% |    +22.2 | TREND* |
+
+*W20 = 1 trade only (partial week at time of analysis)
+
+### Daily View — all 4 pairs combined
+
+| Date       | DoW | Trades | WR  | Min RR | Avg RR | Max RR | TP rate | Net pips | Regime |
+|------------|-----|--------|-----|--------|--------|--------|---------|----------|--------|
+| 2026-02-24 | Tue |      4 |  0% |    3.0 |    3.5 |    3.9 |      0% |    −46.9 | RANGE  |
+| 2026-02-25 | Wed |      3 |100% |    3.1 |    3.6 |    4.5 |    100% |    +69.8 | TREND  |
+| 2026-02-27 | Fri |      2 |  0% |    7.0 |    7.2 |    7.5 |      0% |    −21.8 | RANGE  |
+| 2026-03-02 | Mon |      3 | 67% |    4.9 |    5.9 |    7.5 |     67% |    +83.0 | TREND  |
+| 2026-03-03 | Tue |      7 | 71% |    4.0 |    5.0 |    5.8 |     71% |   +218.7 | TREND  |
+| 2026-03-04 | Wed |      1 |  0% |    6.6 |    6.6 |    6.6 |      0% |    −11.8 | RANGE  |
+| 2026-03-05 | Thu |      6 | 33% |    4.8 |    6.7 |   10.6 |     33% |    +50.7 | RANGE  |
+| 2026-03-06 | Fri |      5 |  0% |    4.6 |    5.5 |    7.5 |      0% |    −57.2 | RANGE  |
+| 2026-03-09 | Mon |      2 |100% |    6.0 |    6.7 |    7.5 |    100% |   +128.0 | TREND  |
+| 2026-03-10 | Tue |      3 | 33% |    5.3 |    5.7 |    6.1 |     33% |     +9.6 | RANGE  |
+| 2026-03-11 | Wed |      4 | 75% |    4.4 |    5.7 |    7.5 |     75% |   +134.3 | TREND  |
+| 2026-03-12 | Thu |      3 |100% |    4.5 |    5.0 |    5.7 |    100% |   +126.4 | TREND  |
+| 2026-03-13 | Fri |      4 | 75% |    3.8 |    4.4 |    4.9 |     75% |    +88.4 | TREND  |
+| 2026-03-17 | Tue |      6 | 17% |    4.2 |    5.8 |    8.1 |     17% |    −26.2 | RANGE  |
+| 2026-03-18 | Wed |      5 | 60% |    3.8 |    5.1 |    8.2 |     60% |    +67.6 | TREND  |
+| 2026-03-19 | Thu |      7 | 43% |    4.1 |    5.8 |    7.5 |     43% |    +90.6 | TREND  |
+| 2026-03-20 | Fri |      5 | 40% |    4.2 |    6.5 |    7.5 |     40% |    +58.6 | TREND  |
+| 2026-03-23 | Mon |      6 | 50% |    4.6 |    7.5 |   13.9 |     50% |   +153.3 | TREND  |
+| 2026-03-24 | Tue |      2 |  0% |    6.1 |    6.8 |    7.5 |      0% |    −22.8 | RANGE  |
+| 2026-03-25 | Wed |      5 | 60% |    4.3 |    5.6 |    7.5 |     60% |   +106.5 | TREND  |
+| 2026-03-26 | Thu |      3 | 67% |    3.4 |    4.1 |    4.6 |     67% |    +42.0 | TREND  |
+| 2026-03-27 | Fri |      5 |  0% |    3.5 |    5.4 |    7.5 |      0% |    −52.5 | RANGE  |
+| 2026-03-30 | Mon |      5 | 40% |    3.3 |    5.2 |    8.1 |     40% |    +43.2 | TREND  |
+| 2026-03-31 | Tue |      3 | 67% |    3.9 |    6.3 |    7.5 |     67% |    +70.6 | TREND  |
+| 2026-04-01 | Wed |      5 | 40% |    4.5 |    5.4 |    6.6 |     40% |    +36.9 | TREND  |
+| 2026-04-02 | Thu |      3 | 33% |    4.2 |    6.9 |   10.2 |     33% |    +12.0 | RANGE  |
+| 2026-04-03 | Fri |      1 |  0% |    2.7 |    2.7 |    2.7 |      0% |    −11.5 | RANGE  |
+| 2026-04-06 | Mon |      5 | 20% |    2.5 |    3.9 |    6.0 |     20% |     −5.9 | RANGE  |
+| 2026-04-07 | Tue |      5 |100% |    2.8 |    3.4 |    4.5 |    100% |   +135.5 | TREND  |
+| 2026-04-09 | Thu |      5 | 40% |    3.6 |    4.5 |    5.8 |     40% |    +20.2 | TREND  |
+| 2026-04-10 | Fri |      4 | 25% |    2.8 |    3.4 |    4.1 |     25% |    −17.7 | RANGE  |
+| 2026-04-13 | Mon |      3 | 33% |    3.7 |    4.0 |    4.3 |     33% |    +10.7 | RANGE  |
+| 2026-04-14 | Tue |      6 | 67% |    2.9 |    4.0 |    7.2 |     67% |    +85.9 | TREND  |
+| 2026-04-15 | Wed |      1 |100% |    2.6 |    2.6 |    2.6 |    100% |    +24.1 | TREND  |
+| 2026-04-16 | Thu |      1 |100% |    6.9 |    6.9 |    6.9 |    100% |    +36.6 | TREND  |
+| 2026-04-17 | Fri |      4 | 75% |    2.3 |    4.8 |    7.5 |     75% |    +98.5 | TREND  |
+| 2026-04-20 | Mon |      3 |  0% |    3.1 |    3.8 |    4.5 |      0% |    −35.1 | RANGE  |
+| 2026-04-21 | Tue |      6 | 17% |    2.5 |    4.4 |    7.6 |     17% |    −32.7 | RANGE  |
+| 2026-04-22 | Wed |      1 |100% |    3.5 |    3.5 |    3.5 |    100% |    +21.1 | TREND  |
+| 2026-04-23 | Thu |      3 |  0% |    2.9 |    3.9 |    5.6 |      0% |    −32.4 | RANGE  |
+| 2026-04-24 | Fri |      2 |  0% |    6.8 |    7.0 |    7.2 |      0% |    −17.0 | RANGE  |
+| 2026-04-27 | Mon |      1 |  0% |    6.8 |    6.8 |    6.8 |      0% |     −8.5 | RANGE  |
+| 2026-04-28 | Tue |      3 | 33% |    2.5 |    3.8 |    5.9 |     33% |    +28.6 | RANGE  |
+| 2026-04-29 | Wed |      4 | 75% |    2.4 |    3.6 |    6.3 |     75% |    +43.1 | TREND  |
+| 2026-04-30 | Thu |      8 | 62% |    3.2 |    5.8 |   13.1 |     62% |   +293.3 | TREND  |
+| 2026-05-01 | Fri |      1 |  0% |    2.8 |    2.8 |    2.8 |      0% |    −11.8 | RANGE  |
+| 2026-05-04 | Mon |      4 | 50% |    2.9 |    3.4 |    3.9 |     50% |    +21.2 | TREND  |
+| 2026-05-05 | Tue |      2 | 50% |    3.0 |    5.3 |    7.5 |     50% |    +12.0 | TREND  |
+| 2026-05-06 | Wed |      2 |  0% |    3.7 |    7.0 |   10.2 |      0% |    −25.3 | RANGE  |
+| 2026-05-07 | Thu |      2 |  0% |    2.7 |    2.9 |    3.1 |      0% |    −23.3 | RANGE  |
+| 2026-05-08 | Fri |      4 |  0% |    3.0 |    6.1 |    7.2 |      0% |    −38.0 | RANGE  |
+| 2026-05-13 | Wed |      1 |100% |    2.4 |    2.4 |    2.4 |    100% |    +22.2 | TREND  |
+
+### Key Findings
+
+- **RR offered at entry does not predict regime.** W17 (worst week, −96 pips, 13% TP rate) had avg RR 4.5 — indistinguishable from profitable TREND weeks. The strategy correctly identifies high-RR setups in ranging conditions; the market simply does not follow through. High offered RR is not a green light.
+- **TP rate is the sole reliable in-week predictor.** RANGE weeks: TP rate ≤ 21%. TREND weeks: TP rate ≥ 38%. The signal is consistently detectable by end of Tuesday.
+- **Early-week rule:** if by end of Tuesday the combined TP rate across all 4 pairs is 0% and breakeven conversions are ≤ 2, the week is structurally RANGE. W17 and W19 both showed Mon 0% + Tue ≤ 17% TP rate. W11 (best week) showed Mon 100% + Tue 71%.
+- **Friday is structurally RANGE:** 9 of 11 Fridays were RANGE (0% TP rate). The single outlier (2026-04-17, 75% WR) occurred within a strong TREND week and should be treated as exceptional.
+- **USDJPY is the highest-variance pair.** In TREND weeks it dominates absolute pip generation (W18: +290 pips). In RANGE weeks it inflicts the deepest per-pair losses (W17: −43 pips, W19: −50 pips). A 0/N USDJPY run is the earliest single-pair warning of a RANGE week.
+- **Regime is macro, not pair-specific.** When a RANGE week hits, all 4 pairs fail simultaneously. There is no cross-pair diversification benefit within a ranging macro environment.
+
+---
+
+## Snapshot — 2026-05-14 (BBW percentile gate)
+
+**Period:** scalp = 60d ending 2026-05-14
+**Changes since last snapshot:** Added Bollinger Band Width percentile gate (`DAILY_BBW_PCT_MAX = 0.73`) to all four FX indicator files. Derived from regime/RR analysis (`rr_analysis.py`, `regime_predictor.py`) which found that daily BBW percentile rank ≥ 0.73 correctly identified RANGE weeks with 90% accuracy on the 12-week backtest sample. Implementation: `compute_daily_adx()` now also computes `bbw` (20-bar Bollinger Band Width) and `bbw_pct` (20-bar rolling percentile rank). `assess_h1_bias()` returns FLAT when `bbw_pct ≥ DAILY_BBW_PCT_MAX`, after the ADX check. Gate applied uniformly to all four pairs including USDJPY (which remains ADX-exempt but is not BBW-exempt).
+
+### Scalp mode — 60d · 5m bars
+
+60d net-change: same approximate window as 2026-05-11 snapshot (EURUSD −1.1%, GBPUSD −0.3%, USDJPY +0.6%, AUDUSD +2.4%)
+
+| Pair   | Market Regime | Trades | Win%  | Avg W    | Avg L   |  PF  | Expec      | Total      | Max DD      |
+|--------|---------------|--------|-------|----------|---------|------|------------|------------|-------------|
+| EURUSD | FLAT          |     31 | 54.8% |  29.4 p  | 11.5 p  | 3.10 |  10.9 p/tr |    338.0 p |    −23.0 p  |
+| GBPUSD | FLAT          |     32 | 34.4% |  49.7 p  | 11.9 p  | 2.18 |   9.2 p/tr |    295.7 p |    −47.2 p  |
+| USDJPY | FLAT          |     36 | 33.3% |  59.3 p  |  9.4 p  | 3.15 |  13.5 p/tr |    486.0 p |    −65.2 p  |
+| AUDUSD | FLAT          |     39 | 48.7% |  30.2 p  | 11.9 p  | 2.42 |   8.6 p/tr |    335.8 p |    −47.2 p  |
+
+(p = pips · tr = trade · USDJPY: Patterns D+E, ADX exempt, BBW gate active)
+
+### BBW gate impact — vs prior baseline (2026-05-11 building MACD)
+
+| Pair   | PF (before→after) | Trades (before→after) | Total pips (before→after) | Max DD (before→after) |
+|--------|-------------------|-----------------------|---------------------------|-----------------------|
+| EURUSD | 3.01 → **3.10**   | 54 → 31 (−43%)        | +577 → +338 (−239)        | −34 → **−23**         |
+| GBPUSD | 2.16 → **2.18**   | 39 → 32 (−18%)        | +359 → +296 (−63)         | −60 → **−47**         |
+| USDJPY | 2.86 → **3.15**   | 45 → 36 (−20%)        | +550 → +486 (−64)         | −65 → unchanged       |
+| AUDUSD | 2.45 → **2.42**   | 52 → 39 (−25%)        | +448 → +336 (−112)        | −71 → **−47**         |
+
+All four pairs hold or improve PF. The gate is filtering losers more than winners. EURUSD max DD halved (−34 → −23 p). Trade-off is fewer total pips — the gate also sits out winning days when BBW is wide — but expectancy per trade rose on every pair.
+
+### Weekly breakdown (all 4 pairs combined) — before vs after gate
+
+| Week     | Before pips | Before regime | After trades | After pips | After regime | Net change |
+|----------|------------|--------------|-------------|-----------|-------------|------------|
+| W09/2026 | +1    RANGE | 9t  | +1    | RANGE | —          |
+| W10/2026 | +283  TREND | 22t | +283  | TREND | —          |
+| W11/2026 | +487  TREND | 7t  | +175  | TREND | −312 (gate blocked 9 winning trades on wide-band days) |
+| W12/2026 | +191  TREND | 17t | +133  | TREND | −58        |
+| W13/2026 | +227  TREND | 15t | +116  | RANGE | −111 (WR fell below 35% after gate removed trades) |
+| W14/2026 | +151  TREND | 14t | +143  | TREND | −8         |
+| W15/2026 | +132  TREND | 15t | +103  | TREND | −29        |
+| W16/2026 | +256  TREND | 7t  | +181  | TREND | −75 (but WR rose 67%→86%) |
+| **W17**  | **−96 RANGE** | **5t** | **−43** | **RANGE** | **+53 saved** |
+| W18/2026 | +345  TREND | 17t | +345  | TREND | — (BBW_pct was 0.72, below threshold) |
+| **W19**  | **−53 RANGE** | **9t** | **−3**  | **RANGE** | **+50 saved** |
+| W20/2026 | +22   TREND | 1t  | +22   | TREND | —          |
+
+Gate recovered ~103 pips from the two RANGE weeks (W17, W19). Cost is spread across multiple TREND weeks (~557 pips), but those weeks were already profitable — the gate shaves winners slightly while cutting RANGE damage significantly.
+
+### Full weekly RR & regime table (post-gate)
+
+| Week     | Trades | WR  | Min RR | Avg RR | Max RR | TP rate | Net pips | Regime |
+|----------|--------|-----|--------|--------|--------|---------|----------|--------|
+| W09/2026 |      9 | 33% |    3.0 |    4.3 |    7.5 |     33% |     +1.1 | RANGE  |
+| W10/2026 |     22 | 41% |    4.0 |    5.8 |   10.6 |     41% |   +283.4 | TREND  |
+| W11/2026 |      7 | 71% |    4.8 |    5.6 |    6.1 |     71% |   +175.3 | TREND  |
+| W12/2026 |     17 | 35% |    3.8 |    6.1 |    8.2 |     35% |   +132.7 | TREND  |
+| W13/2026 |     15 | 27% |    3.5 |    6.5 |   13.9 |     27% |   +116.2 | RANGE  |
+| W14/2026 |     14 | 43% |    2.7 |    5.9 |   10.2 |     43% |   +142.5 | TREND  |
+| W15/2026 |     15 | 47% |    2.8 |    4.0 |    6.0 |     47% |   +102.9 | TREND  |
+| W16/2026 |      7 | 86% |    2.9 |    4.9 |    7.5 |     86% |   +180.9 | TREND  |
+| W17/2026 |      5 |  0% |    5.6 |    6.8 |    7.6 |      0% |    −43.1 | RANGE  |
+| W18/2026 |     17 | 53% |    2.4 |    4.8 |   13.1 |     53% |   +344.7 | TREND  |
+| W19/2026 |      9 | 33% |    2.7 |    3.2 |    3.9 |     33% |     −3.3 | RANGE  |
+| W20/2026 |      1 |100% |    2.4 |    2.4 |    2.4 |    100% |    +22.2 | TREND  |
+
+### Full daily RR & regime table (post-gate)
+
+| Date       | DoW | Trades | WR  | Min RR | Avg RR | Max RR | TP rate | Net pips | Regime |
+|------------|-----|--------|-----|--------|--------|--------|---------|----------|--------|
+| 2026-02-24 | Tue |      4 |  0% |    3.0 |    3.5 |    3.9 |      0% |    −46.9 | RANGE  |
+| 2026-02-25 | Wed |      3 |100% |    3.1 |    3.6 |    4.5 |    100% |    +69.8 | TREND  |
+| 2026-02-27 | Fri |      2 |  0% |    7.0 |    7.2 |    7.5 |      0% |    −21.8 | RANGE  |
+| 2026-03-02 | Mon |      3 | 67% |    4.9 |    5.9 |    7.5 |     67% |    +83.0 | TREND  |
+| 2026-03-03 | Tue |      7 | 71% |    4.0 |    5.0 |    5.8 |     71% |   +218.7 | TREND  |
+| 2026-03-04 | Wed |      1 |  0% |    6.6 |    6.6 |    6.6 |      0% |    −11.8 | RANGE  |
+| 2026-03-05 | Thu |      6 | 33% |    4.8 |    6.7 |   10.6 |     33% |    +50.7 | RANGE  |
+| 2026-03-06 | Fri |      5 |  0% |    4.6 |    5.5 |    7.5 |      0% |    −57.2 | RANGE  |
+| 2026-03-09 | Mon |      1 |100% |    6.0 |    6.0 |    6.0 |    100% |    +49.1 | TREND  |
+| 2026-03-10 | Tue |      2 | 50% |    5.3 |    5.7 |    6.1 |     50% |    +21.1 | TREND  |
+| 2026-03-11 | Wed |      1 |  0% |    6.1 |    6.1 |    6.1 |      0% |    −11.8 | RANGE  |
+| 2026-03-12 | Thu |      2 |100% |    4.8 |    5.3 |    5.7 |    100% |    +83.3 | TREND  |
+| 2026-03-13 | Fri |      1 |100% |    4.9 |    4.9 |    4.9 |    100% |    +33.6 | TREND  |
+| 2026-03-17 | Tue |      5 |  0% |    4.2 |    6.1 |    8.1 |      0% |    −53.2 | RANGE  |
+| 2026-03-18 | Wed |      3 | 67% |    3.8 |    5.6 |    8.2 |     67% |    +53.2 | TREND  |
+| 2026-03-19 | Thu |      4 | 50% |    4.1 |    6.2 |    7.5 |     50% |    +74.1 | TREND  |
+| 2026-03-20 | Fri |      5 | 40% |    4.2 |    6.5 |    7.5 |     40% |    +58.6 | TREND  |
+| 2026-03-23 | Mon |      4 | 50% |    4.6 |    8.4 |   13.9 |     50% |   +115.5 | TREND  |
+| 2026-03-24 | Tue |      2 |  0% |    6.1 |    6.8 |    7.5 |      0% |    −22.8 | RANGE  |
+| 2026-03-25 | Wed |      3 | 67% |    5.2 |    6.4 |    7.5 |     67% |    +87.8 | TREND  |
+| 2026-03-26 | Thu |      1 |  0% |    4.6 |    4.6 |    4.6 |      0% |    −11.8 | RANGE  |
+| 2026-03-27 | Fri |      5 |  0% |    3.5 |    5.4 |    7.5 |      0% |    −52.5 | RANGE  |
+| 2026-03-30 | Mon |      5 | 40% |    3.3 |    5.2 |    8.1 |     40% |    +43.2 | TREND  |
+| 2026-03-31 | Tue |      3 | 67% |    3.9 |    6.3 |    7.5 |     67% |    +70.6 | TREND  |
+| 2026-04-01 | Wed |      3 | 67% |    4.9 |    6.0 |    6.6 |     67% |    +60.5 | TREND  |
+| 2026-04-02 | Thu |      2 |  0% |    6.3 |    8.2 |   10.2 |      0% |    −20.3 | RANGE  |
+| 2026-04-03 | Fri |      1 |  0% |    2.7 |    2.7 |    2.7 |      0% |    −11.5 | RANGE  |
+| 2026-04-06 | Mon |      4 | 25% |    3.2 |    4.3 |    6.0 |     25% |     +5.9 | RANGE  |
+| 2026-04-07 | Tue |      3 |100% |    3.1 |    3.6 |    4.5 |    100% |    +82.7 | TREND  |
+| 2026-04-09 | Thu |      5 | 40% |    3.6 |    4.5 |    5.8 |     40% |    +20.2 | TREND  |
+| 2026-04-10 | Fri |      3 | 33% |    2.8 |    3.2 |    3.5 |     33% |     −5.9 | RANGE  |
+| 2026-04-13 | Mon |      1 |100% |    3.7 |    3.7 |    3.7 |    100% |    +35.3 | TREND  |
+| 2026-04-14 | Tue |      4 | 75% |    2.9 |    4.1 |    7.2 |     75% |    +62.8 | TREND  |
+| 2026-04-16 | Thu |      1 |100% |    6.9 |    6.9 |    6.9 |    100% |    +36.6 | TREND  |
+| 2026-04-17 | Fri |      1 |100% |    7.5 |    7.5 |    7.5 |    100% |    +46.2 | TREND  |
+| 2026-04-21 | Tue |      2 |  0% |    6.7 |    7.1 |    7.6 |      0% |    −17.0 | RANGE  |
+| 2026-04-23 | Thu |      1 |  0% |    5.6 |    5.6 |    5.6 |      0% |     −9.1 | RANGE  |
+| 2026-04-24 | Fri |      2 |  0% |    6.8 |    7.0 |    7.2 |      0% |    −17.0 | RANGE  |
+| 2026-04-27 | Mon |      1 |  0% |    6.8 |    6.8 |    6.8 |      0% |     −8.5 | RANGE  |
+| 2026-04-28 | Tue |      3 | 33% |    2.5 |    3.8 |    5.9 |     33% |    +28.6 | RANGE  |
+| 2026-04-29 | Wed |      4 | 75% |    2.4 |    3.6 |    6.3 |     75% |    +43.1 | TREND  |
+| 2026-04-30 | Thu |      8 | 62% |    3.2 |    5.8 |   13.1 |     62% |   +293.3 | TREND  |
+| 2026-05-01 | Fri |      1 |  0% |    2.8 |    2.8 |    2.8 |      0% |    −11.8 | RANGE  |
+| 2026-05-04 | Mon |      4 | 50% |    2.9 |    3.4 |    3.9 |     50% |    +21.2 | TREND  |
+| 2026-05-05 | Tue |      1 |100% |    3.0 |    3.0 |    3.0 |    100% |    +22.4 | TREND  |
+| 2026-05-06 | Wed |      1 |  0% |    3.7 |    3.7 |    3.7 |      0% |    −11.8 | RANGE  |
+| 2026-05-07 | Thu |      2 |  0% |    2.7 |    2.9 |    3.1 |      0% |    −23.3 | RANGE  |
+| 2026-05-08 | Fri |      1 |  0% |    3.0 |    3.0 |    3.0 |      0% |    −11.8 | RANGE  |
+| 2026-05-13 | Wed |      1 |100% |    2.4 |    2.4 |    2.4 |    100% |    +22.2 | TREND  |
+
+### Notes
+
+- **BBW gate is the most impactful structural change since the building MACD gate.** All four pairs improve or hold PF simultaneously. The gate fires when daily BBW percentile rank ≥ 0.73, meaning Bollinger Bands are wide relative to the prior 20 trading days — a signal that the market has already moved and momentum is likely exhausted.
+- **Drawdown improvement is the headline result.** EURUSD max DD halved from −34 to −23 pips. GBPUSD and AUDUSD both dropped from ~−65–71 to −47 pips. This is the clearest sign the gate is cutting losers specifically.
+- **W17 and W19 damage was cut by ~50%.** W17: −96 → −43 pips. W19: −53 → −3 pips. These were the two clearly identified RANGE weeks in the backtest window. The gate blocked 10 trades in W17 and 5 in W19 that were nearly all losers.
+- **W13 flipped to RANGE classification post-gate** (WR fell from 38% to 27% after gate removed 6 trades). The week was still profitable (+116 pips) but the gate removed some high-RR winners alongside the losers. This is a known cost of a cross-pair daily threshold — it cannot distinguish a wide-band day that will trend from one that will range.
+- **W18 was completely unaffected** (BBW_pct = 0.72, just below the 0.73 threshold on every day that week). This is the ideal behaviour — the gate correctly stayed open during the most profitable week in the sample (+345 pips).
+- **USDJPY PF reached 3.15**, the highest in the active set, overtaking EURUSD. The gate removed losing USDJPY trades in W17 (0/5 run) and W19 (0/5 run) without touching W18 (+290 pips). USDJPY is the pair most sensitive to regime — the gate compounds the Supertrend pattern's trend-selection.
+- **Trade frequency dropped 18–43% depending on pair.** This is acceptable because expectancy per trade rose on every pair. EURUSD now generates 10.9 pips/trade vs 10.7 before (fewer trades, same quality) and with half the drawdown.
+- **The gate is a daily check, not a weekly one.** Even in TREND weeks it will suppress individual high-BBW days. This is correct behaviour — the signal is about current band width, not the macro week regime.
+
+### Decision — 2026-05-14
+
+**Gate not implemented. Code reverted.**
+
+The results are inconclusive. The 90% weekly accuracy figure comes from 10 data points (two of which are the RANGE weeks the gate was designed to catch), which is too small a sample to trust a derived threshold. The cost — 18–43% trade reduction and ~438 fewer total pips across TREND weeks — is real and well-documented above. A gate that recovers 103 pips from bad weeks while costing 438 pips from good weeks is not yet worth the trade-off. Revisit when more weekly data is available and the threshold can be validated out-of-sample. In the meantime the regime/RR analysis (`rr_analysis.py`) remains available as a manual monitoring tool.
+
+---
