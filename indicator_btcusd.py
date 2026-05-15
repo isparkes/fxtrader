@@ -163,10 +163,12 @@ def assess_h1_bias(df: pd.DataFrame, df_4h: Optional[pd.DataFrame] = None) -> di
     atr       = float(last["atr"])
     h1_rsi    = float(last["rsi"])
 
+    prev_macd = float(df.iloc[-2]["macd_hist"]) if len(df) >= 2 else macd_hist
+
     above = close > ema_trend
     below = close < ema_trend
-    bull  = macd_hist > 0 and h1_rsi > 50
-    bear  = macd_hist < 0 and h1_rsi < 50
+    bull  = macd_hist > 0 and macd_hist > prev_macd and h1_rsi > 50
+    bear  = macd_hist < 0 and macd_hist < prev_macd and h1_rsi < 50
 
     if above and bull:
         direction = "BUY"

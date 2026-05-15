@@ -738,7 +738,21 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
             )
             pos.entry_order_id = order_id
             if fill_price is not None:
+                # Re-anchor SL/TP to actual fill price, preserving pip distances
+                # from the signal so risk/reward is correct from the fill.
+                pv      = PAIR_INDICATORS[pair].pip_value(pair)
+                sl_dist = abs(signal.entry_price - signal.stop_loss)
+                tp_dist = abs(signal.take_profit  - signal.entry_price)
                 pos.entry_price = fill_price
+                if signal.direction == "BUY":
+                    pos.stop_loss   = _round_price(fill_price - sl_dist)
+                    pos.take_profit = _round_price(fill_price + tp_dist)
+                else:
+                    pos.stop_loss   = _round_price(fill_price + sl_dist)
+                    pos.take_profit = _round_price(fill_price - tp_dist)
+                pos.risk_pips   = round(sl_dist / pv, 1)
+                pos.reward_pips = round(tp_dist / pv, 1)
+                pos.rr_ratio    = round(tp_dist / sl_dist, 2) if sl_dist > 0 else 0.0
             if pos.entry_order_id:
                 pos.oco_order_list_id = _place_oco_exit(
                     _binance_client, pair, pos.direction,

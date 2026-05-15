@@ -618,3 +618,54 @@ Gate recovered ~103 pips from the two RANGE weeks (W17, W19). Cost is spread acr
 The results are inconclusive. The 90% weekly accuracy figure comes from 10 data points (two of which are the RANGE weeks the gate was designed to catch), which is too small a sample to trust a derived threshold. The cost — 18–43% trade reduction and ~438 fewer total pips across TREND weeks — is real and well-documented above. A gate that recovers 103 pips from bad weeks while costing 438 pips from good weeks is not yet worth the trade-off. Revisit when more weekly data is available and the threshold can be validated out-of-sample. In the meantime the regime/RR analysis (`rr_analysis.py`) remains available as a manual monitoring tool.
 
 ---
+
+## BTCUSD Live Analysis — 2026-05-15
+
+**Period:** 2026-04-25 to 2026-05-15 (48 closed live trades)
+**Summary:** Live PF = 1.087 vs backtest PF 1.74. Two issues identified and fixed.
+
+### Live Performance (before fixes)
+
+| Metric | Value |
+|--------|-------|
+| Trades | 48 |
+| Win rate | 27.1% |
+| Avg win | $730 |
+| Avg loss | $265 |
+| PF | 1.087 |
+| Net P&L | +$763 |
+
+Win rate matched backtest (~27%). Gap was entirely in magnitude: avg wins 23% lower, avg losses 26% higher than backtest.
+
+### Root Cause 1 — SL/TP not re-anchored to fill price (live mode bug)
+
+In live Binance mode, `daemon_crypto.py` overwrites `pos.entry_price` with the actual fill price but leaves `stop_loss` and `take_profit` anchored to the **signal bar's price** (which could be 30–70 minutes stale by the time the daemon polls and Binance fills). 15 of 48 trades had actual SL distances 2–7× larger than `risk_pips` indicated. 7 of those closed at a loss, losing 4,150 pips total vs. ~1,300 expected — excess cost of ~2,850 pips. Had those been capped correctly, live PF would have been ~1.5.
+
+**Fix applied:** After a Binance fill, recompute `stop_loss` and `take_profit` by preserving the signal's pip distances (sl_dist, tp_dist) anchored to the actual fill price. The Binance OCO exit order (placed immediately after) now uses the corrected prices.
+
+### Root Cause 2 — Building MACD gate missing from BTC
+
+All four FX pairs had the building MACD gate applied (2026-05-11, +0.57–1.03 PF each). BTC was never updated — `assess_h1_bias` still used sign-only MACD check.
+
+**Fix applied:** Added `prev_macd` and updated bull/bear conditions in `indicator_btcusd.assess_h1_bias()`, identical to the FX indicator pattern.
+
+### Backtest results after fixes
+
+60d net-change: BTCUSD +23.9% (TREND_UP)
+
+| Mode | Trades | Win% | Avg W | Avg L | PF | Total | Max DD |
+|------|--------|------|-------|-------|-----|-------|--------|
+| Scalp (60d · 5m) | 98 | 31.6% | $951 | $205 | **2.14** | $15,727 | −$1,769 |
+| Long (730d · 1h) | 213 | 31.0% | $2,676 | $389 | **3.09** | $119,498 | −$3,084 |
+
+vs. prior baseline (2026-05-11):
+
+| Mode | PF before | PF after | Trades before→after | Max DD before→after |
+|------|-----------|----------|---------------------|---------------------|
+| Scalp | 1.74 | **2.14** (+0.40) | 131 → 98 (−25%) | −$3,728 → −$1,769 (−53%) |
+| Long | 2.10 | **3.09** (+0.99) | 326 → 213 (−35%) | −$5,244 → −$3,084 (−41%) |
+
+- Drawdown halved in scalp mode — the gate specifically cuts fading-momentum entries that were the source of losing streaks.
+- PF 2.14 in scalp mode puts BTC above EURUSD (3.01), USDJPY (2.86), AUDUSD (2.45), GBPUSD (2.16) ... wait, recalculating — BTC's 2.14 is above GBPUSD (2.16) but below the others. BTC's long-mode 3.09 is the highest of all instruments.
+
+---
