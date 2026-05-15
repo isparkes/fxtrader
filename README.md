@@ -21,6 +21,9 @@ against historical data via the walk-forward backtest.
 | `mailer.py` | SMTP email helper used by both daemons |
 | `tradelog.py` | Append-only trade journal — persists positions across daemon restarts |
 | `backtest.py` | Walk-forward backtest — replays the strategy against historical OHLCV data |
+| `forward_test_fx.py` | Forward-test summary — reads `fx_trades.jsonl` and prints per-week and overall performance tables matching the backtest column layout |
+| `trade_review.py` | Live trade analyser — reads both trade logs and produces full performance breakdowns by pair, period (day / week / month), regime, and pattern |
+| `compare.py` | Backtest vs live comparison — side-by-side table showing each pair's baseline metrics against live results with deltas |
 | `fx_trades.jsonl` | FX daemon trade log — one JSON line per OPEN / BE / CLOSE event |
 | `crypto_trades.jsonl` | Crypto daemon trade log |
 | `{pair}_backtest_trades.csv` | Trade-by-trade backtest output (one file per pair) |
@@ -29,12 +32,12 @@ against historical data via the walk-forward backtest.
 
 ### FX (daemon_fx.py)
 
-| Indicator file | Pair | Yahoo symbol | Oanda instrument |
-|---|---|---|---|
-| `indicator_eurusd.py` | Euro / US Dollar | `EURUSD=X` | `EUR_USD` |
-| `indicator_gbpusd.py` | Cable — British Pound / US Dollar | `GBPUSD=X` | `GBP_USD` |
-| `indicator_usdjpy.py` | US Dollar / Japanese Yen | `USDJPY=X` | `USD_JPY` |
-| `indicator_audusd.py` | Australian Dollar / US Dollar | `AUDUSD=X` | `AUD_USD` |
+| Indicator file | Pair | Yahoo symbol | Oanda instrument | Status |
+|---|---|---|---|---|
+| `indicator_eurusd.py` | Euro / US Dollar | `EURUSD=X` | `EUR_USD` | Active |
+| `indicator_usdjpy.py` | US Dollar / Japanese Yen | `USDJPY=X` | `USD_JPY` | Active |
+| `indicator_audusd.py` | Australian Dollar / US Dollar | `AUDUSD=X` | `AUD_USD` | Active |
+| `indicator_gbpusd.py` | Cable — British Pound / US Dollar | `GBPUSD=X` | `GBP_USD` | **Not traded** — highest drawdown relative to gain; prime candidate to drop under 3-position limit |
 
 ### Crypto (daemon_crypto.py)
 
@@ -63,6 +66,18 @@ python backtest.py --pair btcusd
 
 # Backtest all pairs and show combined summary table
 python backtest.py --all
+
+# Forward-test summary — per-week tables + overall total from the live FX trade log
+python forward_test_fx.py
+
+# Forward-test for a specific month only
+python forward_test_fx.py --month 2026-05
+
+# Full live trade analysis — all periods, regime, and pattern breakdowns
+python trade_review.py
+
+# Side-by-side backtest vs live comparison
+python compare.py
 ```
 
 ---
@@ -468,6 +483,67 @@ each trade:
 python backtest.py --pair eurusd --account 10000 --risk 1.0
 ```
 
+### Trade review (`trade_review.py`)
+
+Reads `fx_trades.jsonl` and `crypto_trades.jsonl` from the live daemons and
+produces a set of backtest-style performance tables for closed trades. Any
+positions still open are listed at the top and excluded from all calculations.
+
+```bash
+python trade_review.py
+python trade_review.py --fx path/to/fx_trades.jsonl --crypto path/to/crypto_trades.jsonl
+```
+
+**Output sections**
+
+| Section | Grouping | Notes |
+|---|---|---|
+| Overall | One row per pair + FX combined subtotal | Full stats; includes avg hold time |
+| Monthly | One row per month; FX and BTC in separate column groups | — |
+| Weekly | One row per ISO week; FX and BTC in separate column groups | — |
+| Daily | One row per calendar date; FX and BTC in separate column groups | — |
+| By regime | TREND\_UP vs TREND\_DOWN, FX pairs and BTCUSD separately | Derived from the 1h bias at entry |
+| By pattern | A / C / D / E, FX pairs only | Pattern extracted from the trade's `basis` field |
+
+**Columns (Overall, By regime, By pattern)**
+
+| Column | Description |
+|---|---|
+| Trades | Number of closed trades |
+| B/E | Trades that closed at exactly breakeven (pnl = 0) |
+| Win % | Percentage of trades with positive pnl |
+| Avg Win | Mean pip (or USD for BTC) gain on winning trades |
+| Avg Loss | Mean pip (or USD for BTC) loss on losing trades |
+| Prof. Factor | Gross profit ÷ gross loss |
+| Expectancy | (WR × avg win) − (LR × avg loss) |
+| Total | Net pips (or USD) across all trades in the group |
+| Max DD | Largest peak-to-trough drawdown within the group |
+| Avg Hold | Mean time from open to close |
+
+**Period tables (Monthly / Weekly / Daily)** show a compact version of the
+above split into two column groups: **FX** (aggregate pips across all FX
+pairs) and **BTC** (USD), since the two instruments are not pip-comparable.
+Columns shown per group: Trades, Win%, PF, Total, Max DD.
+
+**Regime extraction** — the `basis` field logged by the daemon at entry
+(`"1h above EMA50, ..."` or `"1h below EMA50, ..."`) determines TREND\_UP or
+TREND\_DOWN. The BTCUSD daemon uses the same convention.
+
+**Pattern extraction** — the `basis` field also identifies the entry pattern:
+
+| Code | Trigger phrase in `basis` |
+|---|---|
+| A — EMA cross | `EMA8/21 cross` |
+| C — MACD flip | `MACD flip` |
+| D — HA pullback | `HA pullback` |
+| E — Supertrend | `Supertrend flip` |
+
+**B/E trades** are positions where the trailing stop moved to entry and the
+trade was subsequently stopped out at zero pnl. They are counted in total
+trades and shown in the B/E column, but contribute nothing to gross profit or
+gross loss. `close_manual` events (weekend auto-close or manual console
+`close` command) are included with their actual pnl.
+
 ---
 
 ## Tuning a pair
@@ -546,5 +622,9 @@ Daily ADX gate not applied in long mode. USDJPY uses Patterns D+E only.
 
 All five instruments are profitable in both modes. EURUSD leads the active FX
 pairs in scalp mode (PF 3.01, 53.7% WR). USDJPY leads in long mode (PF 2.07).
-BTCUSD has the strongest scalp PF among all instruments after EURUSD. GBPUSD
-has the largest long-mode drawdown relative to total gain and warrants monitoring.
+BTCUSD has the strongest scalp PF among all instruments after EURUSD.
+
+**GBPUSD is currently not traded.** The 30:1 leverage limit caps concurrent
+positions at 3, and GBPUSD carries the largest long-mode drawdown relative to
+total gain across all pairs. The indicator file is retained for backtesting and
+potential reactivation if position headroom opens up.
