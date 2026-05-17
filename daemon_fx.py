@@ -176,6 +176,9 @@ class Position:
     sl_materialised: bool = False        # occult SL placed as a real broker order
     tp_materialised: bool = False        # occult TP placed as a real broker order
     signal_price:  Optional[float] = None  # indicator's intended entry; entry_price is the fill
+    tp_extended:   bool  = False         # True once Phase 3 TP extension has fired
+    original_tp:   float = 0.0           # TP at entry — reference for Phase 3 sizing
+    best_price:    float = 0.0           # running best price seen (high for BUY, low for SELL)
 
 
 @dataclass
@@ -332,23 +335,41 @@ def check_position_events(pos: Position, bar: pd.Series) -> list[tuple[str, floa
     """
     Evaluate the latest 5m bar against the open position.
 
-    Returns an ordered list of (event, price) tuples:
-        "be"       — stop moved to breakeven; position remains open
-        "close_tp" — take profit hit; position closed
-        "close_sl" — stop loss hit;   position closed
+    Three-phase trailing stop model:
 
-    BE is checked first.  If BE and SL are both triggered on the same bar
-    (e.g. a volatile spike), BE is reported before the close.
+      Phase 1 — breakeven:
+        Once price reaches TRAIL_ACTIVATE_FRAC of the TP distance, SL moves to entry.
+
+      Phase 2 — active trail:
+        After BE, the SL ratchets ATR × SL_MULT behind the running best price.
+
+      Phase 3 — TP extension (momentum gate):
+        When the original TP is hit and the current HA candle colour agrees with
+        the trade direction, the trade is extended rather than closed:
+          - SL locks at 90 % of the original TP distance from entry
+          - TP doubles (2 × original TP distance)
+          - Trail tightens to ATR × SL_MULT × 0.5
+
+    Returns an ordered list of (event, price) tuples:
+        "be"        — stop moved to breakeven; position remains open
+        "extend_tp" — TP extended (Phase 3 fired); position remains open
+        "close_tp"  — take profit hit; position closed
+        "close_sl"  — stop loss hit; position closed
     """
     events = []
     high = float(bar["high"])
     low  = float(bar["low"])
+    ind  = PAIR_INDICATORS[pos.pair]
+    pv   = ind.pip_value(pos.pair)
 
-    # Phase 1 — breakeven trigger (80 % of the way to TP)
+    # Guard: initialise best_price for restored positions that pre-date this field
+    if pos.best_price == 0.0:
+        pos.best_price = high if pos.direction == "BUY" else low
+
+    # Phase 1 — breakeven trigger
     if not pos.be_activated:
-        pv            = PAIR_INDICATORS[pos.pair].pip_value(pos.pair)
         tp_dist_pips  = abs(pos.take_profit - pos.entry_price) / pv
-        trail_frac    = getattr(PAIR_INDICATORS[pos.pair], "TRAIL_ACTIVATE_FRAC", TRAIL_ACTIVATE_FRAC)
+        trail_frac    = getattr(ind, "TRAIL_ACTIVATE_FRAC", TRAIL_ACTIVATE_FRAC)
         activate_pips = tp_dist_pips * trail_frac
         progress = (
             (high - pos.entry_price) if pos.direction == "BUY"
@@ -359,7 +380,21 @@ def check_position_events(pos: Position, bar: pd.Series) -> list[tuple[str, floa
             pos.be_activated = True
             events.append(("be", pos.entry_price))
 
-    # Phase 2 — TP / SL exit
+    # Phase 2 / 3 — active trailing after breakeven
+    if pos.be_activated:
+        trail_dist = pos.atr * ind.ATR_SL_MULT * (0.5 if pos.tp_extended else 1.0)
+        if pos.direction == "BUY":
+            pos.best_price = max(pos.best_price, high)
+            new_trail = pos.best_price - trail_dist
+            if new_trail > pos.stop_loss:
+                pos.stop_loss = new_trail
+        else:
+            pos.best_price = min(pos.best_price, low)
+            new_trail = pos.best_price + trail_dist
+            if new_trail < pos.stop_loss:
+                pos.stop_loss = new_trail
+
+    # Check TP / SL hits
     hit_tp = (
         (pos.direction == "BUY"  and high >= pos.take_profit) or
         (pos.direction == "SELL" and low  <= pos.take_profit)
@@ -368,6 +403,29 @@ def check_position_events(pos: Position, bar: pd.Series) -> list[tuple[str, floa
         (pos.direction == "BUY"  and low  <= pos.stop_loss) or
         (pos.direction == "SELL" and high >= pos.stop_loss)
     )
+
+    # Phase 3 — intercept first TP hit: extend if HA candle momentum agrees
+    if hit_tp and not pos.tp_extended:
+        try:
+            ha_c_f = float(bar.get("ha_close", float("nan")))
+            ha_o_f = float(bar.get("ha_open",  float("nan")))
+            momentum_ok = not (pd.isna(ha_c_f) or pd.isna(ha_o_f)) and (
+                (pos.direction == "BUY"  and ha_c_f > ha_o_f) or
+                (pos.direction == "SELL" and ha_c_f < ha_o_f)
+            )
+        except (TypeError, ValueError):
+            momentum_ok = False
+
+        if momentum_ok:
+            ref_tp   = pos.original_tp if pos.original_tp else pos.take_profit
+            tp_dist  = abs(ref_tp - pos.entry_price)
+            sign     = 1 if pos.direction == "BUY" else -1
+            pos.stop_loss   = pos.entry_price + sign * 0.9 * tp_dist
+            pos.take_profit = pos.entry_price + sign * 2.0 * tp_dist
+            pos.be_activated = True
+            pos.tp_extended  = True
+            events.append(("extend_tp", pos.take_profit))
+            return events  # don't add a close event — hold the position
 
     if hit_tp:
         events.append(("close_tp", pos.take_profit))
@@ -419,6 +477,20 @@ def _email_be(pos: Position) -> tuple[str, str]:
         f"Entry        : {pos.entry_price:{pfmt}}",
         f"New SL       : {pos.entry_price:{pfmt}}  (breakeven — risk now zero)",
         f"TP still live: {pos.take_profit:{pfmt}}  ({pos.reward_pips:.1f} {unit} remaining)",
+    ])
+    return subject, body
+
+
+def _email_extend(pos: Position) -> tuple[str, str]:
+    pfmt, unit = _fmt(pos)
+    subject = f"[FX] [{pos.pair.upper()}] {pos.direction} — TP Extended (momentum gate)"
+    body = "\n".join([
+        f"Phase 3 extension triggered on {pos.pair.upper()} {pos.direction}",
+        "",
+        f"Entry        : {pos.entry_price:{pfmt}}",
+        f"New SL       : {pos.stop_loss:{pfmt}}  (locked at 90 % of original TP)",
+        f"New TP       : {pos.take_profit:{pfmt}}  (2× original target)",
+        f"Trail        : tighter (ATR × SL_MULT × 0.5) from here",
     ])
     return subject, body
 
@@ -958,10 +1030,11 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
 
     # ── Manage open position ──────────────────────────────────────────────────
     if state.position is not None:
-        pos    = state.position
-        latest = df_5m.iloc[-1]   # most recent (possibly still-forming) bar
-        events = check_position_events(pos, latest)
-        closed = False
+        pos     = state.position
+        latest  = df_5m.iloc[-1]   # most recent (possibly still-forming) bar
+        prev_sl = pos.stop_loss    # capture before check_position_events mutates it
+        events  = check_position_events(pos, latest)
+        closed  = False
 
         for event, price in events:
             if event == "be":
@@ -979,6 +1052,29 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
                     log.info("[DRY-RUN] %s", subj)
                 else:
                     send_email(subj, body)
+
+            elif event == "extend_tp":
+                log.info(
+                    "%s  TP EXTENDED — new SL=%.5f  new TP=%.5f",
+                    pair.upper(), pos.stop_loss, pos.take_profit,
+                )
+                tradelog.log_be(pos)  # reuse BE log entry to record the SL move
+                if live and pos.trade_id:
+                    try:
+                        if not pos.occult_stops or pos.sl_materialised:
+                            oanda.modify_trade_sl(pos.trade_id, pos.stop_loss, pair)
+                        if not pos.occult_stops or pos.tp_materialised:
+                            oanda.modify_trade_tp(pos.trade_id, pos.take_profit, pair)
+                        log.info("%s  Oanda SL/TP updated for Phase 3 extension — trade_id=%s",
+                                 pair.upper(), pos.trade_id)
+                    except Exception as exc:
+                        log.warning("%s  Oanda extension update failed: %s", pair.upper(), exc)
+                subj, body = _email_extend(pos)
+                if dry_run:
+                    log.info("[DRY-RUN] %s", subj)
+                else:
+                    send_email(subj, body)
+                prev_sl = pos.stop_loss  # reset so trailing delta is measured from new base
 
             elif event in ("close_tp", "close_sl"):
                 if pause_exit:
@@ -1033,10 +1129,23 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
                 break   # no further processing this tick
 
         if not closed:
+            # Phase 2/3 trailing: if the SL ratcheted up this bar, push to broker
+            if pos.stop_loss != prev_sl and live and pos.trade_id:
+                if not pos.occult_stops or pos.sl_materialised:
+                    try:
+                        oanda.modify_trade_sl(pos.trade_id, pos.stop_loss, pair)
+                        log.info(
+                            "%s  trailing SL moved %.5f → %.5f — trade_id=%s",
+                            pair.upper(), prev_sl, pos.stop_loss, pos.trade_id,
+                        )
+                    except Exception as exc:
+                        log.warning("%s  trailing SL update failed: %s", pair.upper(), exc)
+
             log.debug(
-                "%s  position open: entry=%.5f  SL=%.5f  BE=%s",
+                "%s  position open: entry=%.5f  SL=%.5f  BE=%s  extended=%s",
                 pair.upper(), pos.entry_price, pos.stop_loss,
                 "active" if pos.be_activated else "pending",
+                pos.tp_extended,
             )
         return state
 
@@ -1179,6 +1288,8 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
         trade_id      = trade_id,
         occult_stops  = occult_stops,
         signal_price  = signal_entry,
+        original_tp   = signal.take_profit,
+        best_price    = entry_price,
     )
     state.position        = pos
     state.last_signal_bar = entry["bar_time"]
@@ -1221,7 +1332,8 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
 
         pos_data = data.get("position")
         if pos_data:
-            pos = Position(**pos_data)
+            known = Position.__dataclass_fields__.keys()
+            pos = Position(**{k: v for k, v in pos_data.items() if k in known})
             pos.occult_stops = occult_stops  # apply current daemon config
             states[symbol].position = pos
             restored_positions.append(pos)

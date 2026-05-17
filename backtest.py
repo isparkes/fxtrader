@@ -37,17 +37,22 @@ Exit hierarchy (checked in order each bar)
   2. Stop loss hit    — exit at trailing_sl
   3. Neither          — hold; update trailing stop if applicable
 
-Trailing stop — two phases
---------------------------
+Trailing stop — three phases
+----------------------------
   Phase 1 — breakeven trigger:
     Once price reaches TRAIL_ACTIVATE_FRAC (80%) of the initial TP distance
     the stop is moved to entry price. Risk drops to zero (minus spread).
 
   Phase 2 — active trail:
-    From that point the stop trails ATR x ATR_SL_MULT behind the running
-    best price. There is no fixed TP ceiling — the trade runs until the
-    trail is hit. The wide ATR_TP_MULT acts only as an absolute cap against
-    instant gap moves.
+    From that point (including the same bar Phase 1 fires) the stop trails
+    ATR × ATR_SL_MULT behind the running best price.
+
+  Phase 3 — TP extension (momentum gate):
+    When the original TP is first hit and the current HA candle agrees with
+    trade direction, the trade is extended rather than closed:
+      - SL locks at 90 % of the original TP distance from entry
+      - TP doubles (2 × original TP distance)
+      - Trail tightens to ATR × ATR_SL_MULT × 0.5
 
 Usage
 -----
@@ -275,6 +280,9 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
     direction = entry_p = sl = tp = entry_idx = atr = None
     trail_activate_at = None
     entry_pattern = ""
+    tp_extended      = False   # True once Phase 3 extension fires
+    original_tp      = None    # TP level at entry (before any extension)
+    tight_trail_dist = None    # ATR × SL_MULT × 0.5 — tighter trail for Phase 3
 
     for i in range(30, len(bars)):
         row = bars.iloc[i]
@@ -285,13 +293,17 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
             low  = float(row["low"])
             held = i - entry_idx
 
+            # Phase 1 — breakeven; Phase 2/3 — active trail (tighter in Phase 3)
+            # Both can fire in the same bar: if Phase 1 sets be_activated, the
+            # Phase 2 block runs immediately below (matching daemon behaviour).
+            td = tight_trail_dist if tp_extended else trail_distance
             if direction == "BUY":
                 if not be_activated:
                     if (high - entry_p) / pv >= trail_activate_at:
                         trailing_sl  = entry_p
                         be_activated = True
-                else:
-                    new_trail = high - trail_distance
+                if be_activated:
+                    new_trail = high - td
                     if new_trail > trailing_sl:
                         trailing_sl = new_trail
             else:
@@ -299,8 +311,8 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
                     if (entry_p - low) / pv >= trail_activate_at:
                         trailing_sl  = entry_p
                         be_activated = True
-                else:
-                    new_trail = low + trail_distance
+                if be_activated:
+                    new_trail = low + td
                     if new_trail < trailing_sl:
                         trailing_sl = new_trail
 
@@ -308,6 +320,28 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
                      (direction == "SELL" and high >= trailing_sl)
             hit_tp = (direction == "BUY"  and high >= tp) or \
                      (direction == "SELL" and low  <= tp)
+
+            # Phase 3 — intercept the first TP hit: extend if momentum is still good
+            if hit_tp and not tp_extended:
+                ha_c = row.get("ha_close")
+                ha_o = row.get("ha_open")
+                try:
+                    ha_c_f, ha_o_f = float(ha_c), float(ha_o)
+                    momentum_ok = not (pd.isna(ha_c_f) or pd.isna(ha_o_f)) and (
+                        (direction == "BUY"  and ha_c_f > ha_o_f) or
+                        (direction == "SELL" and ha_c_f < ha_o_f)
+                    )
+                except (TypeError, ValueError):
+                    momentum_ok = False
+
+                if momentum_ok:
+                    tp_dist      = abs(original_tp - entry_p)
+                    sign         = 1 if direction == "BUY" else -1
+                    trailing_sl  = entry_p + sign * 0.9 * tp_dist
+                    tp           = entry_p + sign * 2.0 * tp_dist
+                    be_activated = True
+                    tp_extended  = True
+                    continue   # hold — don't exit yet
 
             if hit_tp or hit_sl:
                 exit_p   = tp if hit_tp else trailing_sl
@@ -326,6 +360,7 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
                     "result":    result,
                     "forced":    False,
                     "pattern":   entry_pattern,
+                    "extended":  tp_extended,
                 })
                 if result == "LOSS":
                     cooldown_until = i + COOLDOWN_BARS
@@ -386,6 +421,9 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
         tp_distance_pips  = abs(tp - entry_p) / pv
         trail_frac        = getattr(ind, "TRAIL_ACTIVATE_FRAC", TRAIL_ACTIVATE_FRAC)
         trail_activate_at = tp_distance_pips * trail_frac
+        original_tp       = tp
+        tight_trail_dist  = atr * ind.ATR_SL_MULT * 0.5
+        tp_extended       = False
 
     return trades
 
