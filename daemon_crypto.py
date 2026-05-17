@@ -705,6 +705,20 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool) ->
     if signal.direction == "FLAT":
         return state
 
+    # Sanity-check TP direction before opening any position.
+    # A TP on the wrong side of entry (e.g. BUY with TP < entry) means the
+    # trade would close immediately at a loss — reject it outright.
+    tp_wrong_side = (
+        (signal.direction == "BUY"  and signal.take_profit <= signal.entry_price) or
+        (signal.direction == "SELL" and signal.take_profit >= signal.entry_price)
+    )
+    if tp_wrong_side:
+        log.error(
+            "%s  SIGNAL REJECTED — TP %.2f is on wrong side of entry %.2f for %s",
+            pair.upper(), signal.take_profit, signal.entry_price, signal.direction,
+        )
+        return state
+
     pos = Position(
         pair         = pair,
         symbol       = symbol,

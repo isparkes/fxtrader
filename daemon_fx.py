@@ -1071,6 +1071,18 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
     if signal.direction == "FLAT":
         return state
 
+    # Sanity-check TP direction before opening any position.
+    tp_wrong_side = (
+        (signal.direction == "BUY"  and signal.take_profit <= signal.entry_price) or
+        (signal.direction == "SELL" and signal.take_profit >= signal.entry_price)
+    )
+    if tp_wrong_side:
+        log.error(
+            "%s  SIGNAL REJECTED — TP %.5f is on wrong side of entry %.5f for %s",
+            pair.upper(), signal.take_profit, signal.entry_price, signal.direction,
+        )
+        return state
+
     # ── Spread guard ──────────────────────────────────────────────────────────
     spread_ok, spread_pips = _spread_ok(pair)
     if not spread_ok:

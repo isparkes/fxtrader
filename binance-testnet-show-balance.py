@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from binance.client import Client
 from dotenv import load_dotenv
 
@@ -17,6 +18,15 @@ for b in balances:
     print(f"{b['asset']}: {b['free']}")
 
 # Recent orders
+print("\n--- Recent Orders ---")
 orders = client.get_all_orders(symbol="BTCUSDT", limit=10)
 for o in orders:
     print(o["symbol"], o["side"], o["status"], o["price"])
+
+# Trade history (filled trades only)
+print("\n--- Trade History ---")
+trades = client.get_my_trades(symbol="BTCUSDT", limit=20)
+for t in trades:
+    side = "BUY " if t["isBuyer"] else "SELL"
+    ts   = datetime.fromtimestamp(t["time"] / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{ts}  {side}  qty={t['qty']}  price={t['price']}  commission={t['commission']} {t['commissionAsset']}")
