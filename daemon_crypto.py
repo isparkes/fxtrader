@@ -280,9 +280,14 @@ def _cancel_all_open_orders(client, pair: str) -> None:
     if not sym:
         return
     try:
-        result = client.cancel_all_open_orders(symbol=sym)
-        if result:
-            log.info("Binance: cancelled %d open order(s) for %s", len(result), sym)
+        open_orders = client.get_open_orders(symbol=sym)
+        for order in open_orders:
+            try:
+                client.cancel_order(symbol=sym, orderId=order["orderId"])
+            except BinanceAPIException as exc:
+                log.warning("Binance cancel order %s: %s", order["orderId"], exc)
+        if open_orders:
+            log.info("Binance: cancelled %d open order(s) for %s", len(open_orders), sym)
     except BinanceAPIException as exc:
         log.warning("Binance cancel all orders: %s", exc)
 
