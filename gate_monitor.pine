@@ -156,4 +156,5 @@ if barstate.islast
     table.cell(T, 2, 12, "", bgcolor = _ov_c)
     table.merge_cells(T, 0, 12, 2, 12)
 
-plot(na)
+plot(h4_ema22, "4h EMA 22", color.new(color.orange, 0), 2)
+plot(h1_ema50, "1h EMA 50", color.new(color.aqua,   0), 1)
