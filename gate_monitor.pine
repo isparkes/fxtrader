@@ -13,10 +13,9 @@ i_pos = input.string("top_right", "Table position", options = ["top_right", "top
 adx_thr = i_adx >= 0 ? i_adx : _auto_adx
 
 // ─── Colors ───────────────────────────────────────────────────────────────────
-var C_G  = color.rgb(27,  94,  32,  0)   // deep green  — pass / bull
-var C_R  = color.rgb(183, 28,  28,  0)   // deep red    — fail / bear
-var C_A  = color.rgb(230, 81,  0,   0)   // amber       — flat / neutral
-var C_GR = color.rgb(55,  71,  79,  0)   // slate       — exempt / N/A
+var C_G  = color.rgb(27,  94,  32,  0)   // deep green  — gate open / bull
+var C_R  = color.rgb(183, 28,  28,  0)   // deep red    — gate open / bear
+var C_GR = color.rgb(55,  71,  79,  0)   // slate grey  — gate closed / flat / exempt
 var C_BG = color.rgb(13,  17,  23,  80)  // panel bg
 var C_HD = color.rgb(28,  35,  51,  55)  // header bg
 var C_SP = color.rgb(17,  24,  39,  65)  // separator bg
@@ -88,8 +87,8 @@ overall = h1_bias == 0                  ? 0 :
           h1_bias
 
 // ─── Colour helpers ───────────────────────────────────────────────────────────
-bc(p) => p ? C_G : C_R
-dc(d) => d == 1 ? C_G : d == -1 ? C_R : C_A
+bc(p) => p ? C_G : C_GR
+dc(d) => d == 1 ? C_G : d == -1 ? C_R : C_GR
 ds(d) => d == 1 ? "▲  BUY" : d == -1 ? "▼  SELL" : "●  FLAT"
 
 // ─── Table ───────────────────────────────────────────────────────────────────
@@ -120,14 +119,14 @@ if barstate.islast
     r_hdr(2, "Value  ",  text.align_right)
 
     // ── Binary gates ────────────────────────────────────────────────────────
-    r_row(1, "Session", bc(g_sess), in_sess ? "07-16 UTC  ✓" : str.tostring(utc_h) + "h UTC  ✗", g_sess ? C_G : C_R)
+    r_row(1, "Session", bc(g_sess), in_sess ? "07-16 UTC  ✓" : str.tostring(utc_h) + "h UTC  ✗", g_sess ? C_G : C_GR)
 
-    r_row(2, "5m ATR", bc(g_atr), str.tostring(m5_atr, "#.00000"), g_atr ? C_G : C_R)
+    r_row(2, "5m ATR", bc(g_atr), str.tostring(m5_atr, "#.00000"), g_atr ? C_G : C_GR)
 
     _adx_bg = adx_thr == 0 ? C_GR : bc(g_adx)
     _adx_s  = adx_thr == 0 ? "EXEMPT" :
               str.tostring(math.round(d_adx, 1)) + "  /  " + str.tostring(adx_thr)
-    _adx_vc = adx_thr == 0 ? C_DM : g_adx ? C_G : C_R
+    _adx_vc = adx_thr == 0 ? C_DM : g_adx ? C_G : C_GR
     r_row(3, "Daily ADX", _adx_bg, _adx_s, _adx_vc)
 
     r_sep(4)
@@ -149,7 +148,7 @@ if barstate.islast
     r_row(11, "1h Bias", dc(h1_bias), ds(h1_bias), dc(h1_bias))
 
     // ── Overall — full-width merged row ──────────────────────────────────────
-    _ov_c = dc(overall)
+    _ov_c = overall == 1 ? C_G : overall == -1 ? C_R : C_GR
     _ov_s = overall == 1 ? "▲   B U Y   ▲" : overall == -1 ? "▼   S E L L   ▼" : "●   F L A T   ●"
     table.cell(T, 0, 12, _ov_s, text_color = C_W, text_size = size.normal, bgcolor = _ov_c, text_halign = text.align_center)
     table.cell(T, 1, 12, "", bgcolor = _ov_c)
