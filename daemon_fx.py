@@ -41,11 +41,12 @@ CLI flags override the env vars:
 
 Usage
 -----
-    python daemon_fx.py                         # paper mode — all pairs, poll every 5 min
-    python daemon_fx.py --live                  # live mode — place Oanda orders
-    python daemon_fx.py --pair eurusd           # single pair
-    python daemon_fx.py --interval 60           # poll every 60 s (useful for testing)
-    python daemon_fx.py --dry-run               # log events only, no emails or orders
+    python daemon_fx.py                              # paper mode — adaptive 60s/300s polling
+    python daemon_fx.py --live                       # live mode — place Oanda orders
+    python daemon_fx.py --pair eurusd                # single pair
+    python daemon_fx.py --interval 60               # fix normal interval at 60 s
+    python daemon_fx.py --fast-interval 30           # faster hunting interval (default 60 s)
+    python daemon_fx.py --dry-run                    # log events only, no emails or orders
 
 Running as a background process (macOS / Linux)
 ------------------------------------------------
@@ -190,6 +191,7 @@ class PairState:
     cooldown_until:  Optional[datetime]     = None
     last_signal_bar: Optional[str]          = None  # prevents duplicate entry on same bar
     month_pips:      float                  = 0.0   # cumulative closed-trade pips this calendar month
+    last_bias:       str                    = "FLAT"  # most recent H1 bias direction
 
 
 class ControlState:
@@ -1160,6 +1162,7 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
         return state
 
     h1_bias = ind.assess_h1_bias(df_h1, df_4h=df_4h)
+    state.last_bias = h1_bias["direction"]
     entry   = ind.find_m5_entry(df_5m, h1_bias["direction"])
 
     if h1_bias["direction"] == "FLAT":
@@ -1314,8 +1317,14 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
 # ── Daemon loop ───────────────────────────────────────────────────────────────
 
 def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live: bool,
-                occult_stops: bool = False) -> None:
-    """Poll all watched pairs in sequence, sleep, repeat."""
+                occult_stops: bool = False, fast_interval: int = 60) -> None:
+    """Poll all watched pairs in sequence, sleep, repeat.
+
+    When any pair has a directional H1 bias and no open position the daemon
+    switches to ``fast_interval`` seconds between polls so it can catch every
+    5m bar.  When all pairs are FLAT or fully invested the slower ``interval``
+    is used to reduce unnecessary API calls.
+    """
     states: dict[str, PairState] = {sym: PairState() for _, sym in pairs}
     ctrl   = ControlState()
 
@@ -1349,10 +1358,11 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
     _start_control_server(ctrl, states, pairs)
 
     log.info(
-        "Daemon started — %d pair(s): %s — poll interval %ds%s  [%s]",
+        "Daemon started — %d pair(s): %s — poll interval %ds (fast: %ds)%s  [%s]",
         len(pairs),
         ", ".join(p.upper() for p, _ in pairs),
         interval,
+        fast_interval,
         "  [DRY-RUN]" if dry_run else "",
         "LIVE" if live else "PAPER",
     )
@@ -1369,10 +1379,11 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
     last_summary_slot: Optional[tuple] = None
     current_month: int = datetime.now(timezone.utc).month
     weekend_close_done: Optional[int] = None  # isoweekday of the Friday we last closed
+    next_sleep = interval  # start with normal interval; adapts after first cycle
 
     while True:
         # Sleep until next scheduled poll or until a control command wakes us early.
-        ctrl.wake_event.wait(timeout=interval)
+        ctrl.wake_event.wait(timeout=next_sleep)
         ctrl.wake_event.clear()
 
         now     = datetime.now(timezone.utc)
@@ -1403,6 +1414,7 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
         # ── Weekend: skip pair ticks, market is closed ────────────────────────
         if weekday in (5, 6):
             log.debug("Weekend — skipping pair ticks")
+            next_sleep = interval  # no need to fast-poll when market is closed
         else:
             # ── Friday pre-close: flatten all positions before spread blows out ─
             if weekday == 4 and now.hour >= WEEKEND_CLOSE_HOUR:
@@ -1425,6 +1437,21 @@ def daemon_loop(pairs: list[tuple[str, str]], interval: int, dry_run: bool, live
                                           pause_exit=ctrl.pause_exit)
                 except Exception as exc:
                     log.exception("%s  unexpected error in tick: %s", pair.upper(), exc)
+
+            # Adaptive sleep: use fast_interval when at least one pair has a
+            # directional bias and no open position (i.e. actively hunting an entry).
+            any_hunting = any(
+                states[sym].last_bias != "FLAT" and states[sym].position is None
+                for _, sym in pairs
+            )
+            new_sleep = fast_interval if any_hunting else interval
+            if new_sleep != next_sleep:
+                log.info(
+                    "Poll interval → %ds (%s)",
+                    new_sleep,
+                    "fast: directional bias, hunting entry" if any_hunting else "normal: all FLAT or invested",
+                )
+            next_sleep = new_sleep
 
         # Reset monthly pip totals on calendar month rollover
         if now.month != current_month:
@@ -1480,7 +1507,15 @@ if __name__ == "__main__":
         type=int,
         default=300,
         metavar="SECONDS",
-        help="Poll interval in seconds (default: 300 = 5 min)",
+        help="Normal poll interval in seconds when all pairs are FLAT or invested (default: 300 = 5 min)",
+    )
+    parser.add_argument(
+        "--fast-interval",
+        type=int,
+        default=60,
+        metavar="SECONDS",
+        help="Fast poll interval in seconds used when any pair has a directional bias "
+             "and no open position (default: 60)",
     )
     parser.add_argument(
         "--live",
@@ -1526,4 +1561,4 @@ if __name__ == "__main__":
     pairs_to_watch = [(p, PAIRS[p]) for p in selected]
 
     daemon_loop(pairs_to_watch, args.interval, args.dry_run, args.live,
-                args.occult_stops)
+                args.occult_stops, fast_interval=args.fast_interval)
