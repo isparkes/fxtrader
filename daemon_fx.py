@@ -130,7 +130,7 @@ TRAIL_ACTIVATE_FRAC = 0.80   # mirrors backtest.py
 COOLDOWN_MINS       = 30     # post-loss lockout
 CONTROL_PORT        = int(os.getenv("FX_CTRL_PORT", "9876"))
 
-_GRANULARITY_MAP = {"1h": "H1", "5m": "M5"}  # yfinance → Oanda granularity strings
+_GRANULARITY_MAP = {"1h": "H1", "5m": "M5", "1d": "D"}  # yfinance → Oanda granularity strings
 
 # Typical spread for each pair during normal liquid hours (pips).
 # Entry is rejected when the live spread exceeds 2× this value.
@@ -149,10 +149,12 @@ WEEKEND_CLOSE_HOUR = 20
 # We keep a generous buffer well above that.
 H1_MAX_BARS = 300   # ~12.5 days of 1h bars
 M5_MAX_BARS = 600   # ~50 hours of 5m bars
+D1_MAX_BARS = 100   # ~100 days — ADX(14) needs 14 bars warmup
 
 # How far back to look on each incremental fetch
 H1_LOOKBACK = pd.Timedelta(hours=3)    # overlap ensures no gap at bar boundaries
 M5_LOOKBACK = pd.Timedelta(minutes=15) # same rationale
+D1_LOOKBACK = pd.Timedelta(days=2)     # daily bars: 2-day overlap catches the current session bar
 
 
 # ── Dataclasses ───────────────────────────────────────────────────────────────
@@ -187,6 +189,7 @@ class PairState:
     """All mutable per-pair state held in memory for the lifetime of the daemon."""
     cache_h1:        Optional[pd.DataFrame] = None
     cache_5m:        Optional[pd.DataFrame] = None
+    cache_1d:        Optional[pd.DataFrame] = None
     position:        Optional[Position]     = None
     cooldown_until:  Optional[datetime]     = None
     last_signal_bar: Optional[str]          = None  # prevents duplicate entry on same bar
@@ -281,30 +284,37 @@ def refresh_data(pair: str, symbol: str, state: PairState) -> PairState:
         if use_oanda:
             state.cache_h1 = _fetch_oanda(pair, "1h", count=H1_MAX_BARS)
             state.cache_5m = _fetch_oanda(pair, "5m", count=M5_MAX_BARS)
+            state.cache_1d = _fetch_oanda(pair, "1d", count=D1_MAX_BARS)
         else:
             state.cache_h1 = _fetch_raw(symbol, "1h", period="7d")
             state.cache_5m = _fetch_raw(symbol, "5m", period="2d")
+            state.cache_1d = _fetch_raw(symbol, "1d", period="120d")
         log.info(
-            "%s  cache seeded: %d × 1h bars, %d × 5m bars",
-            symbol, len(state.cache_h1), len(state.cache_5m),
+            "%s  cache seeded: %d × 1h bars, %d × 5m bars, %d × 1d bars",
+            symbol, len(state.cache_h1), len(state.cache_5m), len(state.cache_1d),
         )
         return state
 
     # Incremental refresh — fetch from slightly before the last cached bar
     h1_start = (state.cache_h1.index[-1] - H1_LOOKBACK).to_pydatetime()
     m5_start = (state.cache_5m.index[-1] - M5_LOOKBACK).to_pydatetime()
+    d1_start = (state.cache_1d.index[-1] - D1_LOOKBACK).to_pydatetime()
 
     if use_oanda:
         new_h1 = _fetch_oanda(pair, "1h", start=h1_start)
         new_5m = _fetch_oanda(pair, "5m", start=m5_start)
+        new_1d = _fetch_oanda(pair, "1d", start=d1_start)
     else:
         new_h1 = _fetch_raw(symbol, "1h", start=h1_start)
         new_5m = _fetch_raw(symbol, "5m", start=m5_start)
+        new_1d = _fetch_raw(symbol, "1d", start=d1_start)
 
     if not new_h1.empty:
         state.cache_h1 = _merge_into_cache(state.cache_h1, new_h1, H1_MAX_BARS)
     if not new_5m.empty:
         state.cache_5m = _merge_into_cache(state.cache_5m, new_5m, M5_MAX_BARS)
+    if not new_1d.empty:
+        state.cache_1d = _merge_into_cache(state.cache_1d, new_1d, D1_MAX_BARS)
 
     return state
 
@@ -1030,6 +1040,13 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
     df_4h = ind.compute_h1_indicators(df_4h)
     df_4h["ema_4h"] = EMAIndicator(close=df_4h["close"], window=ind.H4_EMA_PERIOD).ema_indicator()
 
+    # Build daily ADX frame for the ranging-market gate
+    df_1d = None
+    if (hasattr(ind, "compute_daily_adx")
+            and state.cache_1d is not None
+            and len(state.cache_1d) >= 14):
+        df_1d = ind.compute_daily_adx(state.cache_1d.copy())
+
     # ── Manage open position ──────────────────────────────────────────────────
     if state.position is not None:
         pos     = state.position
@@ -1161,7 +1178,11 @@ def tick(pair: str, symbol: str, state: PairState, dry_run: bool, live: bool,
                   pair.upper(), state.cooldown_until.strftime("%H:%M UTC"))
         return state
 
-    h1_bias = ind.assess_h1_bias(df_h1, df_4h=df_4h)
+    if hasattr(ind, "BLOCKED_DAYS") and now.weekday() in ind.BLOCKED_DAYS:
+        log.debug("%s  DOW gate — %s blocked", pair.upper(), now.strftime("%A"))
+        return state
+
+    h1_bias = ind.assess_h1_bias(df_h1, df_4h=df_4h, df_1d=df_1d)
     state.last_bias = h1_bias["direction"]
     entry   = ind.find_m5_entry(df_5m, h1_bias["direction"])
 

@@ -370,6 +370,9 @@ def run_backtest(df_h1: pd.DataFrame, df_5m: pd.DataFrame,
         if use_session and not (SESSION_START_UTC <= ts.hour < SESSION_END_UTC):
             continue
 
+        if hasattr(ind, "BLOCKED_DAYS") and ts.weekday() in ind.BLOCKED_DAYS:
+            continue
+
         if i < cooldown_until:
             continue
 

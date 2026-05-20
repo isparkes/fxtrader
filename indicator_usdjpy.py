@@ -139,6 +139,9 @@ H4_EMA_PERIOD = 22
 # Daily regime gate — skip when daily ADX < threshold (ranging market)
 DAILY_ADX_MIN = 0   # exempt — Supertrend/HA patterns self-select trending conditions
 
+# Day-of-week gate — blocked weekdays (0=Mon … 4=Fri)
+BLOCKED_DAYS: frozenset[int] = frozenset({4})   # Friday: PF 1.27 vs 2.86 overall
+
 # 5m entry
 M5_EMA_FAST      = 8
 M5_EMA_SLOW      = 21
