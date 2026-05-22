@@ -14,8 +14,10 @@ Optional:
 """
 
 import os
-from datetime import datetime
+import time as _time
+from datetime import datetime, timedelta, timezone
 
+import pandas as pd
 import requests
 from dotenv import load_dotenv
 
@@ -180,6 +182,38 @@ def modify_trade_tp(trade_id: str, take_profit: float, pair: str = "") -> dict:
     return resp.json()
 
 
+def cancel_trade_sl(trade_id: str) -> dict:
+    """Remove the stop-loss order attached to an open trade (occult it)."""
+    _require_config()
+    url = f"{_BASE_URL}/v3/accounts/{_ACCOUNT_ID}/trades/{trade_id}"
+    resp = requests.get(url, headers=_headers(), timeout=10)
+    resp.raise_for_status()
+    sl_order = resp.json().get("trade", {}).get("stopLossOrder")
+    if not sl_order:
+        return {"message": "no stop loss order found"}
+    order_id = sl_order["id"]
+    cancel_url = f"{_BASE_URL}/v3/accounts/{_ACCOUNT_ID}/orders/{order_id}/cancel"
+    resp = requests.put(cancel_url, headers=_headers(), timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def cancel_trade_tp(trade_id: str) -> dict:
+    """Remove the take-profit order attached to an open trade (occult it)."""
+    _require_config()
+    url = f"{_BASE_URL}/v3/accounts/{_ACCOUNT_ID}/trades/{trade_id}"
+    resp = requests.get(url, headers=_headers(), timeout=10)
+    resp.raise_for_status()
+    tp_order = resp.json().get("trade", {}).get("takeProfitOrder")
+    if not tp_order:
+        return {"message": "no take profit order found"}
+    order_id = tp_order["id"]
+    cancel_url = f"{_BASE_URL}/v3/accounts/{_ACCOUNT_ID}/orders/{order_id}/cancel"
+    resp = requests.put(cancel_url, headers=_headers(), timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def close_trade(trade_id: str) -> dict:
     """Close an open trade in full by its Oanda trade ID."""
     _require_config()
@@ -219,8 +253,9 @@ def get_candles(
     Args:
         pair:        internal key, e.g. "eurusd"
         granularity: Oanda string — "M5", "M15", "H1", "H4", "D", etc.
-        count:       number of candles (max 5000); ignored when from_time is set
-        from_time:   if given, fetch from this UTC datetime instead of using count
+        count:       number of candles to return (max 5000); combined with from_time
+                     when both are specified — returns up to count candles from that start
+        from_time:   if given, fetch candles whose open time is >= this UTC datetime
 
     Returns a list of dicts with keys: time, open, high, low, close, volume.
     Incomplete (still-forming) candles are excluded.
@@ -228,11 +263,9 @@ def get_candles(
     _require_config()
     instrument = INSTRUMENTS[pair.lower()]
     url = f"{_BASE_URL}/v3/instruments/{instrument}/candles"
-    params: dict = {"granularity": granularity, "price": "M"}
+    params: dict = {"granularity": granularity, "price": "M", "count": count}
     if from_time is not None:
         params["from"] = from_time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
-    else:
-        params["count"] = count
     resp = requests.get(url, headers=_headers(), params=params, timeout=15)
     resp.raise_for_status()
     return [
@@ -247,3 +280,69 @@ def get_candles(
         for c in resp.json()["candles"]
         if c.get("complete", True)
     ]
+
+
+def get_candles_paginated(
+    pair: str,
+    granularity: str,
+    from_time: datetime,
+    to_time: datetime | None = None,
+    page_size: int = 5000,
+) -> pd.DataFrame:
+    """
+    Fetch a large history of candles by paging through OANDA in batches of
+    up to page_size (max 5000) candles per request.
+
+    Repeatedly calls get_candles() with a moving from_time cursor until
+    to_time is reached or a partial page is returned (end of available data).
+
+    Args:
+        pair:        internal pair key, e.g. "eurusd"
+        granularity: Oanda granularity string — "M1", "M5", "H1", "D", etc.
+        from_time:   UTC start datetime (inclusive, candle open time)
+        to_time:     UTC end datetime (inclusive); defaults to now
+        page_size:   candles per request, max 5000
+
+    Returns a UTC-indexed DataFrame with open/high/low/close/volume columns,
+    sorted ascending.  Returns an empty DataFrame if no candles are available.
+    The caller is responsible for deduplication if ranges overlap.
+    """
+    if to_time is None:
+        to_time = datetime.now(timezone.utc)
+
+    accumulated: list[dict] = []
+    cursor = from_time
+
+    while cursor < to_time:
+        batch = get_candles(pair, granularity=granularity, from_time=cursor, count=page_size)
+        if not batch:
+            break
+
+        accumulated.extend(batch)
+
+        if len(batch) < page_size:
+            break  # partial page — consumed all available data up to to_time
+
+        # Advance cursor past the last returned candle.
+        # OANDA timestamps are candle open times (RFC3339, nanosecond precision).
+        # Truncate to seconds then add 1 second to land inside the next candle's
+        # open time for any granularity (M1=60s gap, H1=3600s gap, D=86400s gap).
+        last_open = datetime.strptime(
+            batch[-1]["time"][:19], "%Y-%m-%dT%H:%M:%S"
+        ).replace(tzinfo=timezone.utc)
+        if last_open >= to_time:
+            break
+        cursor = last_open + timedelta(seconds=1)
+        _time.sleep(0.2)  # be polite to the API between pages
+
+    if not accumulated:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+    df = pd.DataFrame(accumulated)
+    df.index = pd.to_datetime(df["time"], utc=True)
+    df.drop(columns=["time"], inplace=True)
+    df = df[~df.index.duplicated(keep="last")]
+    df.sort_index(inplace=True)
+    _to_ts = pd.Timestamp(to_time) if to_time.tzinfo is not None else pd.Timestamp(to_time, tz="UTC")
+    df = df[df.index <= _to_ts]
+    return df[["open", "high", "low", "close", "volume"]]

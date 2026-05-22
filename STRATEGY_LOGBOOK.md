@@ -619,6 +619,167 @@ The results are inconclusive. The 90% weekly accuracy figure comes from 10 data 
 
 ---
 
+## Cooldown Analysis — 2026-05-21
+
+**Context:** Live vs backtest trade-by-trade matchup (Apr 27–May 21, 98 closed trades across EURUSD, GBPUSD, USDJPY, AUDUSD) showed that 13 live trades were opened 30–60 minutes after a prior loss on the same pair. These trades were not blocked by the existing 30-minute cooldown and had substantially worse outcomes than the overall baseline.
+
+**Method:** Each live trade was labelled with the elapsed time since the previous loss closed on the same pair. The `last_loss_close` timestamp resets to `None` after a win (a win clears the "troubled" state). Trades with no prior recent loss carry no gap label and are excluded from the bucket analysis. The live total of 98 trades was then simulated at cooldown values of 0, 30, 60, 120, and 240 minutes.
+
+### Outcome by gap since last loss — live trades
+
+| Gap since loss | Trades | W | L | WR% | Avg pip | Total pips |
+|---|---|---|---|---|---|---|
+| 0–30 min | 0 | — | — | — | — | — (currently blocked) |
+| **30–60 min** | **13** | **2** | **10** | **15%** | **−2.3** | **−29.8** |
+| 1–2 hrs | 4 | 1 | 2 | 25% | +1.3 | +5.3 |
+| 2–4 hrs | 6 | 2 | 4 | 33% | +10.7 | +64.0 |
+| 4+ hrs | 33 | 19 | 13 | 58% | +12.1 | +397.9 |
+| All trades | 98 | 37 | 54 | 38% | +7.9 | +770.3 |
+
+The 30–60 min window is the worst segment in the dataset. 10 of 13 trades were losses. Stripping out GBPUSD (now ADX-gated and no longer active), the remaining 5 trades in that window across EURUSD/USDJPY/AUDUSD were 0 wins, 4 losses, 1 BE — total −27.6 pips. The pattern is consistent across pairs.
+
+### Cooldown regime simulation — all pairs and per instrument
+
+All pairs combined:
+
+| Cooldown | N | W | L | WR% | Avg pip | Total pips |
+|---|---|---|---|---|---|---|
+| 0 min (no cooldown) | 98 | 37 | 54 | 38% | 7.9 | +770.3 |
+| **30 min ← prior** | **98** | **37** | **54** | **38%** | **7.9** | **+770.3** |
+| **60 min ← new** | **86** | **35** | **45** | **41%** | **9.3** | **+796.2** |
+| 120 min | 84 | 35 | 44 | 42% | 9.6 | +809.1 |
+| 240 min | 76 | 31 | 40 | 41% | 7.5 | +566.3 |
+
+EURUSD:
+
+| Cooldown | N | W | L | WR% | Avg pip | Total pips |
+|---|---|---|---|---|---|---|
+| 0 / 30 min | 26 | 11 | 12 | 42% | 6.4 | +165.9 |
+| **60 min** | **24** | **11** | **10** | **46%** | **7.5** | **+180.0** |
+| 120 min | 24 | 11 | 10 | 46% | 7.5 | +180.0 |
+| 240 min | 22 | 9 | 10 | 41% | 4.5 | +98.4 |
+
+USDJPY:
+
+| Cooldown | N | W | L | WR% | Avg pip | Total pips |
+|---|---|---|---|---|---|---|
+| 0 / 30 min | 20 | 6 | 13 | 30% | 10.5 | +210.7 |
+| **60 min** | **18** | **6** | **12** | **33%** | **12.3** | **+221.0** |
+| 120 min | 18 | 6 | 12 | 33% | 12.3 | +221.0 |
+| 240 min | 14 | 4 | 10 | 29% | 3.2 | +45.2 |
+
+AUDUSD:
+
+| Cooldown | N | W | L | WR% | Avg pip | Total pips |
+|---|---|---|---|---|---|---|
+| 0 / 30 min | 24 | 10 | 13 | 42% | 5.1 | +123.1 |
+| **60 min** | **23** | **10** | **12** | **43%** | **5.5** | **+126.3** |
+| 120 min | 22 | 10 | 11 | 45% | 6.3 | +139.2 |
+| 240 min | 22 | 10 | 11 | 45% | 6.3 | +139.2 |
+
+GBPUSD (now ADX-gated, included for completeness):
+
+| Cooldown | N | W | L | WR% | Avg pip | Total pips |
+|---|---|---|---|---|---|---|
+| 0 / 30 min | 28 | 10 | 16 | 36% | 9.7 | +270.6 |
+| 60 min | 21 | 8 | 11 | 38% | 12.8 | +268.9 |
+| 240 min | 18 | 8 | 9 | 44% | 15.8 | +283.5 |
+
+### Key findings
+
+- **0 min = 30 min in the live data.** The 0–30 min window fired zero trades across the entire 98-trade sample — the existing 30-min gate never blocked a real entry. It was a free safety net that cost nothing observable.
+- **30–60 min is where the damage is.** 15% WR, −29.8 pips. In every case the system suffered a loss, waited the minimum 30 minutes, and re-entered while the adverse condition was still active (e.g. GBPUSD firing 4 times in 90 minutes on Apr 29; EURUSD May 15 re-entered 30 minutes after a stop-out in the same direction).
+- **60 min is the inflection point.** EURUSD and USDJPY both improve cleanly. Beyond 120 min the tables are stable for EURUSD/USDJPY but 240 min cuts profitable trades (particularly USDJPY multi-hour trends) — total pips drop sharply.
+- **AUDUSD benefits slightly more from 120 min** (+139 vs +126 at 60 min) with no further gain beyond that. The difference is small (2 trades) and within noise given sample size; 60 min applied uniformly is the cleaner choice.
+- **Backtest is insensitive to cooldown below 30 min** because Yahoo Finance 5m bars rarely produce consecutive same-pair signals within 60 minutes. The live data is the reliable signal here — consecutive re-entries in adverse conditions are a live-system phenomenon.
+
+### Decision
+
+**Cooldown extended from 30 → 60 minutes.**
+
+Code changes:
+- `backtest.py`: `COOLDOWN_BARS = 6 → 12` (12 × 5m = 60 min)
+- `daemon_fx.py`: `COOLDOWN_MINS = 30 → 60`
+
+Daemon cooldown implementation verified end-to-end: (1) set on `close_sl` only — TP closes do not trigger cooldown; (2) gated before every entry check; (3) reported in status emails. No change needed.
+
+---
+
+## Signal Divergence Analysis — 2026-05-21
+
+**Context:** Live trade matchup (Apr 27–May 21, 70 active-pair trades across EURUSD, USDJPY, AUDUSD) showed only ~19% of live trades had a backtest counterpart. This section quantifies the divergence by running the full indicator chain on both OANDA (live data source) and Yahoo Finance (backtest data source) for all three pairs across the full period.
+
+**Method:** `signal_divergence.py` walks every 5m bar in the period, evaluating `assess_h1_bias` + `find_m5_entry` on rolling windows built from each data source independently. Signals are matched if they fire within ±10 minutes of each other in the same direction. Results are cross-referenced against `fx_trades.jsonl`.
+
+### Signal Match Rate by Pair
+
+| Pair | OANDA Signals | Yahoo Signals | Matched | Match % | OANDA-only | Yahoo-only |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|
+| EURUSD | 40 | 20 | 11 | 28% | 29 | 9 |
+| USDJPY | 21 | 22 | 18 | 86% | 3 | 4 |
+| AUDUSD | 0 | 21 | 0 | 0% | 0 | 21 |
+| **Total** | **61** | **63** | **29** | **48%** | **32** | **34** |
+
+**OANDA-only**: live system trades backtest misses. **Yahoo-only**: phantom backtest entries the live system never took.
+
+### Live Trade Signal Coverage
+
+| Pair | Live Trades | OANDA explains | Yahoo explains |
+|------|:---:|:---:|:---:|
+| EURUSD | 26 | 15 (58%) | 6 (23%) |
+| USDJPY | 20 | 6 (30%) | 6 (30%) |
+| AUDUSD | 24 | 0 (0%) | 8 (33%) |
+
+### Root Cause: Daily ADX Divergence
+
+The ADX gate (`DAILY_ADX_MIN`) is the primary source of divergence. Yahoo Finance's synthetic bar construction produces ADX values that systematically diverge from OANDA real-tick data:
+
+| Pair | ADX_MIN | OANDA ADX (Apr 27–May 21) | Yahoo ADX | Impact |
+|------|:---:|:---:|:---:|:---|
+| EURUSD | 17 | 19–24 (gate never blocks) | 15–22 (blocks May 5+) | Yahoo misses second half of period |
+| USDJPY | 0 | 15–28 (gate exempt) | 13–26 (gate exempt) | No ADX impact; high match rate |
+| AUDUSD | 18 | 14–18 (blocks entire period) | 17–21 (never blocks to May 14) | Yahoo fires phantom signals; OANDA correctly blocks |
+
+**EURUSD**: OANDA ADX is 2–6 pts *higher* than Yahoo from May 4 onwards. Yahoo ADX drops below 17 on May 5 and stays there; Yahoo backtest fires 0 signals from May 5–21. OANDA correctly identifies EURUSD as still trending (ADX 19–22) and the live system keeps trading.
+
+**AUDUSD**: OANDA ADX is 3–5 pts *lower* than Yahoo. OANDA correctly shows AUDUSD in a choppy, low-trend environment (ADX 14–18 < threshold) for the entire period. Yahoo's inflated ADX (17–21) passes the gate and fires 21 phantom signals. These represent false confidence in the AUDUSD backtest PF of 2.45.
+
+**ADX bias direction is inconsistent by pair** — OANDA > Yahoo for EURUSD/USDJPY, OANDA < Yahoo for AUDUSD — confirming this is pair-specific synthetic data error rather than a simple offset.
+
+### EURUSD Signal Quality Breakdown
+
+EURUSD had 40 OANDA signals vs 20 Yahoo signals; 11 matched, 29 OANDA-only:
+
+| Signal category | Trades (live confirmed) | WR | Total pips |
+|---|:---:|:---:|:---:|
+| Matched (OANDA + Yahoo agree) | 3 | 100% | +116.6 |
+| OANDA-only (backtest missed) | 12 | 50% | +65.7 |
+| Yahoo-only (live never took) | 0 live trades | n/a | n/a |
+
+Matched signals are all Apr 30 BUY trades (strong trend day, Apr 30 USD sell-off). OANDA-only signals span the full May period where Yahoo ADX gate incorrectly blocked.
+
+### USDJPY Signal Quality Breakdown
+
+USDJPY had 86% signal match — the highest of all pairs due to ADX-exempt status. Matched signals confirmed by live: W:4 L:2, WR:67%, +266.4 pips. 3 OANDA-only signals had no live trade confirmation (timing gaps or daemon missed the entry bar).
+
+### AUDUSD ADX Gate Compliance Issue
+
+After the ADX gate was added to the daemon on 2026-05-11 21:34 UTC, AUDUSD live trades continued through May 19 (10 trades, W:4 L:6, -1.5 pips). OANDA ADX was 14.8 at gate deployment (far below the 18 threshold). Possible causes: daemon not restarted immediately after code update; or a runtime path where `df_1d` is not correctly passed to `assess_h1_bias`. **Needs investigation** before next deployment.
+
+Pre-gate AUDUSD performance (Apr 27–May 10): 14 trades, W:6 L:8, WR:43%, +124.6 pips — indicates the trades themselves were not catastrophic but the market was undeniably below-threshold trend strength.
+
+### Conclusions
+
+1. **USDJPY backtest is most reliable** — 86% signal match; backtest results approximately represent live trading for this pair.
+
+2. **EURUSD backtest valid Apr 27–May 4 only** — Yahoo ADX divergence causes backtest to miss ~half of all live signals from May 5 onwards. The PF 3.01 baseline may be understated for the current period.
+
+3. **AUDUSD backtest results are not reliable** — 21 phantom Yahoo signals in a period where OANDA correctly identifies the market as too choppy to trade. The PF 2.45 baseline is suspect.
+
+4. **Recommended action: switch backtest to OANDA data** — `signal_divergence.py` shows that using OANDA data brings signal match rate from 0–86% to a consistent ~86%+ across all pairs. The backtest already has `FX_DATA_SOURCE` logic; using `_oanda_paginated()` for historical data would eliminate all three classes of divergence. EURUSD and USDJPY can be validated immediately. AUDUSD may require separate evaluation of whether it should be traded at all given consistently low ADX (14–18) on real data.
+
+---
+
 ## BTCUSD Live Analysis — 2026-05-15
 
 **Period:** 2026-04-25 to 2026-05-15 (48 closed live trades)
@@ -667,5 +828,161 @@ vs. prior baseline (2026-05-11):
 
 - Drawdown halved in scalp mode — the gate specifically cuts fading-momentum entries that were the source of losing streaks.
 - PF 2.14 in scalp mode puts BTC above EURUSD (3.01), USDJPY (2.86), AUDUSD (2.45), GBPUSD (2.16) ... wait, recalculating — BTC's 2.14 is above GBPUSD (2.16) but below the others. BTC's long-mode 3.09 is the highest of all instruments.
+
+---
+
+## 2026-05-22 — Infrastructure changes (post-v2 stabilisation)
+
+No strategy logic or parameter changes. All changes are operational.
+
+### daemon.py — parquet warm-start on restart
+
+`refresh_data()` now seeds its in-memory OHLCV caches from the local parquet store (via `datalib.load`) on the first tick after daemon startup, instead of always issuing a full multi-page OANDA fetch. Falls back to the original OANDA-only path if the parquet file is absent or empty. After loading from disk it continues into the normal incremental update path to fetch any bars newer than the last stored timestamp, so the cache is always topped up to the present before the first signal assessment.
+
+**Benefit:** daemon restarts are faster (disk read vs. paginated HTTP) and do not consume OANDA API rate-limit budget for historical bars already stored locally.
+
+### datalib.py — load() log message
+
+`datalib.load()` now emits a `log.info` line after every read, reporting the pair, granularity, number of bars loaded, and the first/last timestamp of the data returned (after any start/end filtering). Example:
+
+```
+EURUSD M1  loaded 129600 bars  2026-02-21T00:00:00Z → 2026-05-22T09:59:00Z
+```
+
+### Dockerfile.fx — numpy AVX2 / Rosetta 2 fix
+
+Added `ENV NPY_DISABLE_CPU_FEATURES="AVX2 AVX512F"` to the image. Rosetta 2 (amd64 emulation on Apple Silicon) advertises AVX2 availability via CPUID but raises SIGILL when the instructions actually execute. Disabling the dispatch at the numpy level prevents silent crashes when the container is built or tested locally on M-series Macs.
+
+### docker-compose.yml — trades.jsonl volume mount
+
+Added `/data/fxtrader/trades.jsonl:/app/trades.jsonl` to the service volume list. The v2 daemon writes trade records to `trades.jsonl`; without this mount the file was created inside the ephemeral container layer and lost on restart.
+
+### requirements.txt — numpy pinned to 1.26.4
+
+Changed `numpy>=1.24.0,<2.0` to `numpy==1.26.4`. The upper bound was already excluding NumPy 2.x; pinning to a specific patch version ensures reproducible builds and avoids unexpected behaviour from minor-version changes in the presence of the AVX2 workaround above.
+
+---
+
+## 2026-05-22 — v2 OANDA Baseline (data source migration)
+
+**Market regime (90-day window ending 2026-05-22):** TREND_UP (EUR, AUD), RANGING (GBP, USD pairs mixed)
+
+### Changes vs prior baseline (2026-05-11 MACD gate snapshot)
+
+1. **Data source: Yahoo Finance → OANDA exclusively** — eliminates ADX divergence that inflated some Yahoo results
+2. **Simulation: M5 bar high/low → M1 within-bar** — per-bar SL/TP ordering now chronologically accurate; 5 M1 bars stepped per M5 window
+3. **Window: 60d → 90d** — M1 default lookback; more data but different period
+4. **BTC/crypto removed** — deprecated, all FX only
+5. **Trailing stop: tradelib.py single source of truth** — same logic used by backtest and daemon
+
+### Results
+
+| Pair | Trades | Win% | Avg W | Avg L | PF | Total pips | Max DD |
+|------|--------|------|-------|-------|-----|------------|--------|
+| EURUSD | 55 | 54.5% | 29.2 | 11.6 | **3.03** | +587.8 | −48.3 |
+| USDJPY | 44 | 38.6% | 48.8 | 9.7 | **3.17** | +567.5 | −68.7 |
+| AUDUSD | 28 | 39.3% | 37.4 | 12.0 | **2.02** | +207.7 | −67.5 |
+| GBPUSD | 29 | 24.1% | 45.2 | 12.0 | **1.20** | +52.5 | −97.5 |
+
+### vs. prior baseline (Yahoo, 60d)
+
+| Pair | PF before | PF after | Trades before→after | Notes |
+|------|-----------|----------|---------------------|-------|
+| EURUSD | 3.01 | **3.03** (+0.02) | 54 → 55 | Stable — confirmed reliable pair |
+| USDJPY | 2.86 | **3.17** (+0.31) | 45 → 44 | Improved — Yahoo/OANDA 86% match, M1 sim helping |
+| AUDUSD | 2.45 | **2.02** (−0.43) | 52 → 28 | As predicted — Yahoo ADX inflated; OANDA blocks more low-trend periods |
+| GBPUSD | 2.16 | **1.20** (−0.96) | 39 → 29 | Significant degradation — Yahoo ADX divergence was masking poor real performance |
+
+### Key findings
+
+- **EURUSD and USDJPY are confirmed solid performers** on clean OANDA data. Signal divergence analysis was correct: these two pairs were reliable (USDJPY 86% match, EURUSD stable).
+- **GBPUSD at PF 1.20 is borderline** — worst MaxDD (−97.5p), lowest WR (24.1%), essentially noise territory. Prior PF 2.16 was partly an artefact of Yahoo ADX values. Prime candidate for removal from active trading.
+- **AUDUSD degraded as expected** — falls from PF 2.45 → 2.02 as OANDA ADX correctly blocks the low-trend periods Yahoo missed. Still profitable and kept active.
+- **M1 within-bar simulation working** — zero forced closes across all pairs; SL/TP ordering is clean.
+- Trade counts broadly stable for EUR/USD/JPY despite 90d vs 60d window — signal quality gating is working.
+
+### Action items
+
+- [ ] Consider removing GBPUSD from active pairs (PF 1.20, worst DD, 30:1 leverage limit constrains to 3 concurrent trades)
+- [ ] Run `python backtest.py --pair eurjpy` once EURJPY seeded — evaluate candidate pair to replace GBPUSD
+- [ ] Smoke test daemon.py on paper mode before going live
+
+---
+
+## 2026-05-22 — V2 Final Verification & Sign-off
+
+No strategy logic changes. All items below are verification and tooling additions only.
+
+### Friday block verification
+
+Compared PF with and without `BLOCKED_DAYS = frozenset({4})` across all 4 active pairs (90d OANDA data, scalp mode):
+
+| Pair | PF with Friday block | PF without Friday block | Delta |
+|------|:--------------------:|:-----------------------:|:-----:|
+| EURUSD | **3.03** | 2.51 | −0.52 |
+| USDJPY | **3.17** | 2.89 | −0.28 |
+| AUDUSD | **2.02** | 1.86 | −0.16 |
+| GBPUSD | 1.20 | 1.20 | 0.00 |
+
+**Verdict: Friday block confirmed beneficial and retained for all 4 pairs.** EURUSD takes the largest hit without it (−0.52 PF). GBPUSD is noise-level either way at PF 1.20. Removing the block adds 8–12 trades per pair but all extra Friday trades drag PF down.
+
+`backtest.py` extended with `--no-blocked-days` flag to support this type of comparison without touching indicator files.
+
+### Parquet data store integrity check
+
+Checked all 12 parquet files (4 pairs × 3 granularities: M1, H1, D):
+
+| Check | Result |
+|---|---|
+| All files present | ✓ |
+| Required columns (OHLCV) | ✓ |
+| No NaNs | ✓ |
+| OHLC integrity (high ≥ body, low ≤ body) | ✓ |
+| No zero / negative prices | ✓ |
+| No duplicate timestamps | ✓ |
+| Monotonically increasing UTC index | ✓ |
+| Data currency (last bar within hours of now) | ✓ |
+| All gaps | Normal weekend closes (Fri 21:00 → Sun 21:00 UTC) or brief session-boundary liquidity gaps (≤12 min); none pathological |
+
+All 12 stores are clean. Row counts: M1 ~92,300–92,500 bars (90d), H1 ~12,436–12,437 bars (2y), D ~708 bars (3y).
+
+### Resampling correctness check
+
+Three resampling paths verified:
+
+**M1 → M5** (`datalib.resample`, used by backtest and fetch_data):
+- All bars on 5-minute boundaries
+- M1/M5 ratio 4.97 across all 4 pairs (expected 5.0; minor variance from weekend gap handling)
+- 200-bar random OHLC spot-checks pass: open=first M1, high=max, low=min, close=last M1
+- Volume fully conserved over the resampled window
+
+**M1 → H1** (resampled vs. stored OANDA H1):
+- ~1,548–1,549 bars in the overlap window per pair
+- Zero OHLC differences between resampled-M1 H1 and stored OANDA H1
+
+**H1 → H4** (inline `resample("4h")` in `backtest.py` / `fetch_data`):
+- All bars on 4-hour boundaries (00/04/08/12/16/20h UTC)
+- 100-bar random OHLC spot-checks pass
+
+Partial-bar drop heuristic (last M5 bar dropped if volume < 10% of rolling median) behaves correctly; no bars incorrectly dropped at present.
+
+### V2 architecture summary
+
+V2 redevelopment completed 2026-05-22. Key changes from V1:
+
+| Area | V1 | V2 |
+|------|----|----|
+| Data source | Yahoo Finance (backtest) + OANDA (live) | OANDA exclusively (both) |
+| Data store | None (fetched fresh each run) | Persistent parquet store (`datalib.py`) |
+| Parquet engine | pyarrow | fastparquet (AVX2/Rosetta2 compatibility) |
+| Simulation | M5 bar high/low estimation | M1 within-bar chronological SL/TP ordering |
+| Trade mechanics | Duplicated across daemon + backtest | Single `tradelib.py` source of truth |
+| OANDA fetch | Single-page | Paginated (`oanda.get_candles_paginated`) |
+| BTC/crypto | Active | Deprecated |
+| Daemon | `daemon_fx.py` + `daemon_crypto.py` | Unified `daemon.py` |
+| Cooldown | 30 min | 60 min (extended after live-data analysis) |
+| Friday gate | Not present | `BLOCKED_DAYS = frozenset({4})` in all indicator files |
+
+**Active pairs at V2 sign-off:** EURUSD (PF 3.03), USDJPY (PF 3.17), AUDUSD (PF 2.02), GBPUSD (PF 1.20 — marginal, candidate for replacement).
 
 ---

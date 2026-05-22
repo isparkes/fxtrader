@@ -1,6 +1,9 @@
 __pycache__
 .env
+.env.deploy
 *backtest*.csv
 *.jsonl
 fxtrader.log
 cryptotrader.log
+data/
+/**/.DS_Store

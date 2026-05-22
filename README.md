@@ -295,6 +295,11 @@ provides a sizing reference that matches the scale of the trade.
 ### Entry patterns (5m bars — evaluated only when bias is active)
 
 Pre-checks applied to every bar:
+- **Trading day gate** — no new entries on Friday, Saturday, or Sunday. Applied
+  in scalp mode only; skipped in long mode. Not applied to BTCUSD (24/7 market).
+  The per-pair `BLOCKED_DAYS` constant (set to `{4}` — Friday — for all FX pairs)
+  controls which weekdays are suppressed; the daemon also skips ticks entirely
+  on Saturday (5) and Sunday (6).
 - **Session gate** — bar must fall within 07:00–16:00 UTC (London open through
   NY afternoon). Only applied in scalp mode; skipped in long mode. Not applied
   to BTCUSD (24/7 market).
@@ -354,6 +359,7 @@ testing showed sub-1.0 PF for each on that pair.
 | Trailing stop — phase 2 | Trail ATR × 0.4 behind best price | Runs from breakeven; exits when momentum exhausts |
 | Cooldown after loss | 6 bars (30 min in scalp mode) | Prevents revenge trading |
 | Spread guard | Block entry if live spread > 2× standard | Queried from Oanda at signal time; guards against news spikes and thin liquidity |
+| Trading day gate | Monday–Thursday only | Friday is suppressed via `BLOCKED_DAYS = {4}` — PF across all pairs is materially lower on Fridays (chop/low liquidity). Saturday and Sunday are blocked by the daemon's weekend skip. |
 | Weekend auto-close | Friday ≥ 20:00 UTC | All open positions closed at mid-price before weekend spread blowout; a close email is sent per position. Ticks are skipped entirely on Saturday and Sunday. |
 
 Standard spreads used by the guard (pip thresholds at 2× these values trigger rejection):
@@ -403,6 +409,12 @@ independently per pair.
 | Parameter | Constant | EURUSD | GBPUSD | USDJPY | AUDUSD |
 |---|---|---|---|---|---|
 | Daily ADX floor | `DAILY_ADX_MIN` | 17 | 25 | 0 (exempt) | 18 |
+
+**Trading day gate**
+
+| Parameter | Constant | All FX pairs | BTCUSD |
+|---|---|---|---|
+| Blocked weekdays (0=Mon … 6=Sun) | `BLOCKED_DAYS` | `{4}` (Friday) | not set (24/7) |
 
 **Risk**
 
@@ -597,7 +609,7 @@ impractical at the 5m/1h entry timeframe.
 
 ### Scalp mode — 60 days · 5m bars (as of 2026-05-11)
 
-Active gates: 1h EMA50 + building MACD + RSI; 4h EMA22; daily ADX; session gate (07:00–16:00 UTC).
+Active gates: 1h EMA50 + building MACD + RSI; 4h EMA22; daily ADX; session gate (07:00–16:00 UTC); trading day gate (Mon–Thu only).
 USDJPY uses Patterns D+E only; EURUSD/GBPUSD/AUDUSD use Patterns A+C+D.
 
 | Pair | Trades | Win % | Avg Win | Avg Loss | Prof. Factor | Expectancy | Total | Max DD | Unit |

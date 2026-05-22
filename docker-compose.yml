@@ -6,26 +6,14 @@ services:
     ports:
       - "127.0.0.1:9876:9876"   # control console — localhost only
     volumes:
-      - /data/fxtrader/fx_trades.jsonl:/app/trades.jsonl
-      - /data/fxtrader/fxtrader.log:/app/fxtrader.log
+      - /Users/iansparkes/Data/Projects/fxtrader/fx_trades.jsonl:/app/fx_trades.jsonl
+      - /Users/iansparkes/Data/Projects/fxtrader/trades.jsonl:/app/trades.jsonl
+      - /Users/iansparkes/Data/Projects/fxtrader/fxtrader.log:/app/fxtrader.log
+      - /Users/iansparkes/Data/Projects/fxtrader/data/oanda:/app/data/oanda   # persistent OANDA parquet store
     # Override CMD to pass flags, e.g.:
-    #   command: ["--live"]                                       # enable Oanda order execution
+    #   command: ["--live"]                                       # enable OANDA order execution
     #   command: ["--dry-run"]                                    # log only, no emails or orders
-    #   command: ["--live", "--pair", "eurusd", "usdjpy"]         # trade specific pairs (CLI)
-    #   command: ["--live", "--interval", "60"]
+    #   command: ["--live", "--occult-stops"]                     # hide SL/TP from broker
+    #   command: ["--live", "--pair", "eurusd", "usdjpy"]         # trade specific pairs
     #   command: ["--log-level", "DEBUG"]
     # Or set FX_PAIRS=eurusd,usdjpy,audusd in .env to select pairs without rebuilding the image.
-
-  cryptotrader:
-    image: ${CRYPTOTRADER_IMAGE}
-    env_file: .env
-    restart: unless-stopped
-    volumes:
-      - /data/fxtrader/crypto_trades.jsonl:/app/trades.jsonl
-      - /data/fxtrader/cryptotrader.log:/app/cryptotrader.log
-    # Override CMD to pass flags, e.g.:
-    #   command: ["--live"]                                  # enable Binance order execution
-    #   command: ["--dry-run"]                               # log only, no emails or orders
-    #   command: ["--live", "--interval", "60"]
-    #   command: ["--log-level", "DEBUG"]
-

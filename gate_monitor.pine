@@ -57,6 +57,20 @@ var float ha_open = na
 ha_open := na(ha_open[1]) ? (open + close) / 2 : (ha_open[1] + ha_close[1]) / 2
 dir_ha   = ha_close > ha_open ? 1 : -1
 
+// ─── Day-of-week gate (Fri/Sat/Sun blocked) ──────────────────────────────────
+utc_dow    = dayofweek(time, "UTC")
+is_friday  = utc_dow == dayofweek.friday
+is_weekend = utc_dow == dayofweek.saturday or utc_dow == dayofweek.sunday
+g_day      = not is_friday and not is_weekend
+
+_dow_name  = utc_dow == dayofweek.monday    ? "Mon" :
+             utc_dow == dayofweek.tuesday   ? "Tue" :
+             utc_dow == dayofweek.wednesday ? "Wed" :
+             utc_dow == dayofweek.thursday  ? "Thu" :
+             utc_dow == dayofweek.friday    ? "Fri" :
+             utc_dow == dayofweek.saturday  ? "Sat" :
+             utc_dow == dayofweek.sunday    ? "Sun" : "?"
+
 // ─── Session gate (UTC) ───────────────────────────────────────────────────────
 utc_h   = hour(time, "UTC")
 in_sess = utc_h >= 7 and utc_h < 16
@@ -77,13 +91,14 @@ dir_rsi  = h1_rsi  > 50       ?  1 : h1_rsi  < 50 ? -1 : 0
 h1_bias = dir_ema == 1 and dir_macd == 1 and dir_rsi == 1 ?  1 :
           dir_ema ==-1 and dir_macd ==-1 and dir_rsi ==-1 ? -1 : 0
 
-// Overall: 1h bias ∩ 4h alignment ∩ ADX ∩ ATR ∩ session
+// Overall: 1h bias ∩ 4h alignment ∩ ADX ∩ ATR ∩ session ∩ trading day
 overall = h1_bias == 0                  ? 0 :
           h1_bias == 1 and dir_h4 != 1  ? 0 :
           h1_bias ==-1 and dir_h4 !=-1  ? 0 :
           not g_adx                     ? 0 :
           not g_atr                     ? 0 :
           not g_sess                    ? 0 :
+          not g_day                     ? 0 :
           h1_bias
 
 // ─── Colour helpers ───────────────────────────────────────────────────────────
@@ -94,7 +109,7 @@ ds(d) => d == 1 ? "▲  BUY" : d == -1 ? "▼  SELL" : "●  FLAT"
 // ─── Table ───────────────────────────────────────────────────────────────────
 _tp = i_pos == "top_right"    ? position.top_right : i_pos == "top_left"     ? position.top_left     : i_pos == "bottom_right" ? position.bottom_right : position.bottom_left
 
-var table T = table.new(_tp, 3, 13, bgcolor      = C_BG, border_color = color.new(color.white, 82), border_width = 1, frame_color  = color.new(color.white, 60), frame_width  = 1)
+var table T = table.new(_tp, 3, 14, bgcolor      = C_BG, border_color = color.new(color.white, 82), border_width = 1, frame_color  = color.new(color.white, 60), frame_width  = 1)
 
 // ─── Cell helpers (reference T via closure) ───────────────────────────────────
 r_hdr(c, txt, ha) =>
@@ -119,41 +134,44 @@ if barstate.islast
     r_hdr(2, "Value  ",  text.align_right)
 
     // ── Binary gates ────────────────────────────────────────────────────────
-    r_row(1, "Session", bc(g_sess), in_sess ? "07-16 UTC  ✓" : str.tostring(utc_h) + "h UTC  ✗", g_sess ? C_G : C_GR)
+    _day_s = g_day ? _dow_name + "  ✓" : _dow_name + "  ✗  (no trades)"
+    r_row(1, "Trading Day", bc(g_day), _day_s, g_day ? C_G : C_GR)
 
-    r_row(2, "5m ATR", bc(g_atr), str.tostring(m5_atr, "#.00000"), g_atr ? C_G : C_GR)
+    r_row(2, "Session", bc(g_sess), in_sess ? "07-16 UTC  ✓" : str.tostring(utc_h) + "h UTC  ✗", g_sess ? C_G : C_GR)
+
+    r_row(3, "5m ATR", bc(g_atr), str.tostring(m5_atr, "#.00000"), g_atr ? C_G : C_GR)
 
     _adx_bg = adx_thr == 0 ? C_GR : bc(g_adx)
     _adx_s  = adx_thr == 0 ? "EXEMPT" :
               str.tostring(math.round(d_adx, 1)) + "  /  " + str.tostring(adx_thr)
     _adx_vc = adx_thr == 0 ? C_DM : g_adx ? C_G : C_GR
-    r_row(3, "Daily ADX", _adx_bg, _adx_s, _adx_vc)
+    r_row(4, "Daily ADX", _adx_bg, _adx_s, _adx_vc)
 
-    r_sep(4)
+    r_sep(5)
 
     // ── Directional gates ────────────────────────────────────────────────────
-    r_row(5, "4h EMA22", dc(dir_h4), dir_h4 == 1 ? "▲ above" : "▼ below", dc(dir_h4))
+    r_row(6, "4h EMA22", dc(dir_h4), dir_h4 == 1 ? "▲ above" : "▼ below", dc(dir_h4))
 
-    r_row(6, "1h EMA50", dc(dir_ema), dir_ema == 1 ? "▲ above" : "▼ below", dc(dir_ema))
+    r_row(7, "1h EMA50", dc(dir_ema), dir_ema == 1 ? "▲ above" : "▼ below", dc(dir_ema))
 
     _macd_arrow = h1_hist > h1_hist_prev ? " ↑" : " ↓"
-    r_row(7, "1h MACD hist", dc(dir_macd), str.tostring(h1_hist, "#.000000") + _macd_arrow, dc(dir_macd))
+    r_row(8, "1h MACD hist", dc(dir_macd), str.tostring(h1_hist, "#.000000") + _macd_arrow, dc(dir_macd))
 
-    r_row(8, "1h RSI(14)", dc(dir_rsi), str.tostring(math.round(h1_rsi, 1)), dc(dir_rsi))
+    r_row(9, "1h RSI(14)", dc(dir_rsi), str.tostring(math.round(h1_rsi, 1)), dc(dir_rsi))
 
-    r_row(9, "5m HA", dc(dir_ha), dir_ha == 1 ? "▲ green" : "▼ red", dc(dir_ha))
+    r_row(10, "5m HA", dc(dir_ha), dir_ha == 1 ? "▲ green" : "▼ red", dc(dir_ha))
 
-    r_sep(10)
+    r_sep(11)
 
-    r_row(11, "1h Bias", dc(h1_bias), ds(h1_bias), dc(h1_bias))
+    r_row(12, "1h Bias", dc(h1_bias), ds(h1_bias), dc(h1_bias))
 
     // ── Overall — full-width merged row ──────────────────────────────────────
     _ov_c = overall == 1 ? C_G : overall == -1 ? C_R : C_GR
     _ov_s = overall == 1 ? "▲   B U Y   ▲" : overall == -1 ? "▼   S E L L   ▼" : "●   F L A T   ●"
-    table.cell(T, 0, 12, _ov_s, text_color = C_W, text_size = size.normal, bgcolor = _ov_c, text_halign = text.align_center)
-    table.cell(T, 1, 12, "", bgcolor = _ov_c)
-    table.cell(T, 2, 12, "", bgcolor = _ov_c)
-    table.merge_cells(T, 0, 12, 2, 12)
+    table.cell(T, 0, 13, _ov_s, text_color = C_W, text_size = size.normal, bgcolor = _ov_c, text_halign = text.align_center)
+    table.cell(T, 1, 13, "", bgcolor = _ov_c)
+    table.cell(T, 2, 13, "", bgcolor = _ov_c)
+    table.merge_cells(T, 0, 13, 2, 13)
 
 plot(h4_ema22, "4h EMA 22", color.new(color.orange, 0), 2)
 plot(h1_ema50, "1h EMA 50", color.new(color.aqua,   0), 1)

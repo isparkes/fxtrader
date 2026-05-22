@@ -91,38 +91,19 @@ Trailing stop — two phases:
 Cooldown:    No new entry for 30 minutes (6 × 5m bars) after a loss.
 """
 
-import logging
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
-import yfinance as yf
 from ta.trend import MACD, EMAIndicator, ADXIndicator
 from ta.momentum import RSIIndicator, StochasticOscillator
 from ta.volatility import AverageTrueRange
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich import box
-
-logging.basicConfig(level=logging.WARNING)
-console = Console()
-
-# ── Supported pairs ──────────────────────────────────────────────────────────
-# Maps a short name (CLI arg) → Yahoo Finance ticker symbol.
-# Add new pairs here; everything else adapts automatically.
-PAIRS: dict[str, str] = {
-    "gbpusd": "GBPUSD=X",
-}
-
-SYMBOL = "GBPUSD=X"
 
 
 def pip_value(symbol: str) -> float:
     """Return the pip size for a symbol. JPY pairs use 0.01; all others 0.0001."""
     return 0.01 if "JPY" in symbol.upper() else 0.0001
-
 
 # ── Tunable parameters ────────────────────────────────────────────────────────
 # 1h trend
@@ -165,7 +146,6 @@ SESSION_START_UTC = 7
 SESSION_END_UTC   = 16
 # ─────────────────────────────────────────────────────────────────────────────
 
-
 @dataclass
 class Signal:
     timestamp: str
@@ -181,34 +161,6 @@ class Signal:
     risk_pips: Optional[float]
     reward_pips: Optional[float]
     rr_ratio: Optional[float]
-
-
-def fetch_ohlcv(symbol: str, interval: str, period: str) -> pd.DataFrame:
-    """
-    Download OHLCV bars from Yahoo Finance and return a clean DataFrame.
-
-    Columns are lowercased and any MultiIndex (returned by some yfinance
-    versions when a single ticker is requested) is flattened. Rows
-    containing NaN are dropped before returning.
-
-    Args:
-        symbol:   Yahoo Finance ticker, e.g. "EURUSD=X".
-        interval: Bar size string, e.g. "1h", "5m".
-        period:   Lookback window string, e.g. "60d", "5d".
-
-    Raises:
-        RuntimeError: If Yahoo Finance returns an empty DataFrame.
-    """
-    df = yf.download(symbol, interval=interval, period=period, progress=False, auto_adjust=True)
-    if df.empty:
-        raise RuntimeError(f"No data returned for {symbol} @ {interval}")
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0].lower() for c in df.columns]
-    else:
-        df.columns = [c.lower() for c in df.columns]
-    df.dropna(inplace=True)
-    return df
-
 
 def compute_h1_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -241,12 +193,10 @@ def compute_h1_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-
 def compute_daily_adx(df: pd.DataFrame) -> pd.DataFrame:
     adx = ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=14)
     df["adx"] = adx.adx()
     return df
-
 
 def compute_m5_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -307,7 +257,6 @@ def compute_m5_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ha_low"]   = df[["low",  "ha_open", "ha_close"]].min(axis=1)
 
     return df
-
 
 def assess_h1_bias(df: pd.DataFrame, df_4h: Optional[pd.DataFrame] = None,
                    df_1d: Optional[pd.DataFrame] = None) -> dict:
@@ -377,7 +326,6 @@ def assess_h1_bias(df: pd.DataFrame, df_4h: Optional[pd.DataFrame] = None,
         "trend":      "above EMA50" if above else "below EMA50",
         "close":      close,
     }
-
 
 def find_m5_entry(df5m: pd.DataFrame, direction: str,
                    use_session: bool = True) -> Optional[dict]:
@@ -498,7 +446,6 @@ def find_m5_entry(df5m: pd.DataFrame, direction: str,
 
     return last_entry
 
-
 def compute_sl_tp(
     entry_result: dict, bias: str, atr: float, spread: float, pv: float
 ) -> Optional[tuple[float, float, float]]:
@@ -533,7 +480,6 @@ def compute_sl_tp(
         sl      = entry_p + sl_dist
         tp      = entry_p - atr * ATR_TP_MULT
     return entry_p, sl, tp
-
 
 def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD=X") -> Signal:
     """
@@ -631,99 +577,3 @@ def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD=X")
         rr_ratio=round(rr, 2),
     )
 
-
-def run(symbol: str = SYMBOL) -> Signal:
-    """
-    Fetch live data, compute indicators, and return the current signal.
-
-    Fetches 60 days of 1h data for trend context and 5 days of 5m data
-    for entry timing. The shorter 5m window keeps the entry scan focused
-    on the most recent price action.
-
-    Args:
-        symbol: Yahoo Finance ticker, e.g. "EURUSD=X" or "GBPUSD=X".
-    """
-    console.print(f"[bold cyan]Fetching {symbol} data...[/]")
-
-    df_1h = fetch_ohlcv(symbol, interval="1h", period="60d")
-    df_5m = fetch_ohlcv(symbol, interval="5m", period="5d")
-
-    df_1h_ind = compute_h1_indicators(df_1h.copy())
-    df_4h = df_1h.resample("4h").agg({
-        "open": "first", "high": "max", "low": "min",
-        "close": "last", "volume": "sum",
-    }).dropna()
-    df_4h = compute_h1_indicators(df_4h)
-    df_4h["ema_4h"] = EMAIndicator(close=df_4h["close"], window=H4_EMA_PERIOD).ema_indicator()
-    df_5m = compute_m5_indicators(df_5m)
-
-    df_1d = fetch_ohlcv(symbol, interval="1d", period="90d")
-    df_1d = compute_daily_adx(df_1d)
-
-    h1_bias = assess_h1_bias(df_1h_ind, df_4h=df_4h, df_1d=df_1d)
-    entry   = find_m5_entry(df_5m, h1_bias["direction"])
-    signal  = build_signal(h1_bias, entry, symbol)
-
-    return signal
-
-
-def display_signal(signal: Signal, symbol: str = SYMBOL) -> None:
-    """Render the signal as a Rich panel to the terminal."""
-    colour = {
-        "BUY":  "bold green",
-        "SELL": "bold red",
-        "FLAT": "bold yellow",
-    }[signal.direction]
-
-    table = Table(box=box.ROUNDED, show_header=False, padding=(0, 2))
-    table.add_column("Field", style="dim")
-    table.add_column("Value")
-
-    table.add_row("Timestamp",   signal.timestamp)
-    table.add_row("Direction",   f"[{colour}]{signal.direction}[/]")
-
-    if signal.direction != "FLAT":
-        table.add_row("Entry",       f"{signal.entry_price:.5f}")
-        table.add_row("Stop Loss",   f"{signal.stop_loss:.5f}  ({signal.risk_pips:.0f} pips)")
-        table.add_row("Take Profit", f"{signal.take_profit:.5f}  ({signal.reward_pips:.0f} pips)")
-        table.add_row("R:R",         f"1 : {signal.rr_ratio:.2f}")
-
-    table.add_row("ATR(14) 1h",  f"{signal.atr:.5f}")
-    table.add_row("1h Trend",    signal.h1_trend or "")
-    table.add_row("1h RSI",      f"{signal.h1_rsi:.1f}" if signal.h1_rsi is not None else "—")
-    table.add_row("MACD Hist",   f"{signal.h1_macd_hist:.6f}")
-    table.add_row("Basis",       signal.entry_basis)
-
-    pair_label = symbol.replace("=X", "")
-    console.print(Panel(table, title=f"[bold]{pair_label} Scalper Signal[/]", border_style="cyan"))
-
-
-if __name__ == "__main__":
-    import argparse as _argparse
-
-    _parser = _argparse.ArgumentParser(description="FX Scalper — live signal generator")
-    _parser.add_argument(
-        "--pair",
-        default="gbpusd",
-        choices=list(PAIRS.keys()),
-        help="Currency pair to analyse (default: gbpusd)",
-    )
-    _parser.add_argument(
-        "--all",
-        action="store_true",
-        help="Run all supported pairs",
-    )
-    _parser.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Only display non-FLAT signals",
-    )
-    _args = _parser.parse_args()
-
-    _pairs_to_run = list(PAIRS.items()) if _args.all else [(_args.pair, PAIRS[_args.pair])]
-
-    for _pair_name, _symbol in _pairs_to_run:
-        signal = run(_symbol)
-        if _args.quiet and signal.direction == "FLAT":
-            continue
-        display_signal(signal, _symbol)

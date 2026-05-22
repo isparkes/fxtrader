@@ -2,11 +2,23 @@
 
 ## Overview
 
-This tool generates intraday scalping signals for major FX pairs and BTCUSD
-using a two-timeframe approach: the **1h chart** sets the directional bias,
-and the **5m chart** finds precise entry timing within that bias.  It can be
-used interactively (one-shot signal checks) or as a long-running daemon that
-sends email alerts. The crypto daemon also places orders directly on Binance.
+This tool generates intraday scalping signals for four major FX pairs (EURUSD,
+GBPUSD, USDJPY, AUDUSD) using a two-timeframe approach: the **1h chart** sets
+the directional bias, and the **5m chart** finds precise entry timing within
+that bias. It runs as a long-running daemon that sends email alerts and manages
+positions through the OANDA REST API. Discretionary trades opened manually can
+also be registered for automated trailing-stop management.
+
+**v2 architecture (2026-05-22):**
+
+| Module | Role |
+|--------|------|
+| `daemon.py` | Unified daemon — automated signals + discretionary trade management |
+| `backtest.py` | Walk-forward simulation against OANDA parquet data |
+| `tradelib.py` | Single source of truth: Position dataclass, trailing-stop logic, unit sizing |
+| `datalib.py` | Persistent OANDA parquet store (M1/H1/D per pair) |
+| `oanda.py` | OANDA REST client with paginated multi-page fetching |
+| `indicator_<pair>.py` | Per-pair parameters and indicator computation |
 
 ---
 
@@ -21,30 +33,72 @@ source .venv/bin/activate          # macOS / Linux
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Configure email (optional — required for daemon alerts)
+# 3. Configure OANDA and email credentials
 cp .env.example .env
-# edit .env with your SMTP credentials
-# for the crypto daemon also add BINANCE_API_KEY, BINANCE_API_SECRET, etc.
+# Edit .env — required fields listed in the OANDA Integration section below
+
+# 4. Seed the OANDA data store (one-time setup, ~2 min per pair)
+python datalib.py seed
+
+# 5. Verify the data
+python datalib.py status
 ```
+
+---
+
+## Data Library (`datalib.py`)
+
+All historical data is sourced exclusively from OANDA and stored locally as
+Parquet files in `data/oanda/`. Yahoo Finance is not used anywhere in the
+project.
+
+### Default storage
+
+| Granularity | Lookback | ~Bars/pair | Purpose |
+|-------------|----------|------------|---------|
+| M1 | 90 days | ~92,000 | Entry simulation (M5 resampled from M1 at runtime) |
+| H1 | 730 days | ~12,400 | Bias indicators, MACD gate |
+| D | 1000 days | ~700 | Daily ADX gate |
+
+M5 is never stored. It is always resampled from M1 at runtime via `datalib.resample()`.
+
+### CLI
+
+```bash
+# First-time setup — seed all pairs (run once)
+python datalib.py seed
+
+# Seed a single pair
+python datalib.py seed eurusd
+
+# Incremental update — fetch only new bars since last stored timestamp
+python datalib.py update
+
+# Update a single pair
+python datalib.py update eurusd
+
+# Show stored date ranges and file sizes
+python datalib.py status
+
+# Verify row counts and test resample for a pair
+python datalib.py verify eurusd
+```
+
+The daemon calls `datalib.update(pair)` at the start of each tick automatically,
+so the store stays current without manual intervention during normal operation.
 
 ---
 
 ## Interactive Mode (per-pair indicator scripts)
 
 Each active pair has its own indicator file. Run it directly to get an
-immediate signal.
-
-### Basic usage
+immediate signal check against the current OANDA candles.
 
 ```bash
-# FX pairs
 python indicator_eurusd.py
 python indicator_gbpusd.py
 python indicator_usdjpy.py
 python indicator_audusd.py
-
-# BTCUSD
-python indicator_btcusd.py
 
 # Suppress FLAT (no-signal) output
 python indicator_eurusd.py --quiet
@@ -52,278 +106,120 @@ python indicator_eurusd.py --quiet
 
 ### Active pairs
 
-| Script | Pair | Ticker |
-|--------|------|--------|
-| `indicator_eurusd.py` | Euro / US Dollar | `EURUSD=X` |
-| `indicator_gbpusd.py` | Cable — British Pound / US Dollar | `GBPUSD=X` |
-| `indicator_usdjpy.py` | US Dollar / Japanese Yen | `USDJPY=X` |
-| `indicator_audusd.py` | Australian Dollar / US Dollar | `AUDUSD=X` |
-| `indicator_btcusd.py` | Bitcoin / US Dollar | `BTC-USD` |
+| Script | Pair |
+|--------|------|
+| `indicator_eurusd.py` | Euro / US Dollar |
+| `indicator_gbpusd.py` | British Pound / US Dollar |
+| `indicator_usdjpy.py` | US Dollar / Japanese Yen |
+| `indicator_audusd.py` | Australian Dollar / US Dollar |
 
-Each file contains its own tunable parameter block at the top. Changing
-values there affects only that pair — `daemon_fx.py`, `daemon_crypto.py`, and
-`backtest.py` all dispatch to the correct file automatically.
+Each file contains its own tunable parameter block at the top. Changing values
+there affects only that pair — `daemon.py` and `backtest.py` dispatch to the
+correct file automatically via `PAIR_INDICATORS`.
 
 ### Output
 
-Each signal panel shows:
-
-| Field        | Meaning                                             |
-|--------------|-----------------------------------------------------|
-| Direction    | **BUY**, **SELL**, or **FLAT** (no signal)          |
-| Entry        | Suggested entry price                               |
-| Stop Loss    | Hard stop (ATR × 0.4, floored at `HA_SL_MIN_PIPS` for patterns A/C; clamped pullback extreme for D) |
-| Take Profit  | Wide ceiling (ATR × 3.0 from entry)                |
-| R:R          | Risk-to-reward ratio                                |
-| ATR(14) 1h   | 1h Average True Range — volatility measure         |
-| 1h Trend     | Price position relative to EMA50                   |
-| 1h RSI       | 1h RSI(14) — momentum gate                         |
-| MACD Hist    | 1h MACD histogram — momentum direction             |
-| Basis        | Which pattern fired and on which bar               |
-
-The daemons write every OPEN / BE / CLOSE event to their trade logs
-(`fx_trades.jsonl` / `crypto_trades.jsonl`).
-
-### Signal logic summary
-
-**Trend gates (1h — all three must pass):**
-1. Price above/below EMA(50)
-2. MACD histogram positive (BUY) or negative (SELL)
-3. RSI(14) above 50 for BUY, below 50 for SELL
-
-**4h agreement gate (Measure 4):**
-- 4h close must also be above/below the **4h EMA(22)** in the same direction as the 1h bias
-- Trades where 1h and 4h conflict are suppressed as FLAT
-
-**Entry patterns (5m — first match wins):**
-- **Pattern A** — EMA(8) crosses EMA(21) in trend direction, confirmed by RSI(7) and Stochastic
-- **Pattern C** — 5m MACD histogram flips sign in trend direction while price is on the right side of EMA(21)
-- **Pattern D** — 3 same-colour Heikin-Ashi candles → 1 opposing pullback candle → resumption in trend direction; stop anchored to pullback extreme
-
-**Session filter:** FX entries only fire during **07:00–16:00 UTC** (London / NY overlap). BTCUSD has no session filter (24/7 market).
-
-**Risk management:**
-- Stop loss (A/C): ATR × 0.4, floored at `HA_SL_MIN_PIPS` (10 pips for EURUSD/GBPUSD/AUDUSD, 7 pips for USDJPY). The floor prevents low-ATR conditions from producing an unrealistically tight stop and the correspondingly oversized position that would result.
-- Stop loss (D): pullback candle extreme ± buffer, clamped to `HA_SL_MIN_PIPS`–`HA_SL_MAX_PIPS`
-- Take profit: ATR × 3.0 (wide ceiling)
-- **Breakeven move:** stop moves to entry once price reaches a fraction of the TP distance (70% for EURUSD, 80% for all other pairs)
-- **Cooldown:** no new entry for 30 minutes after a loss
-- **Spread guard:** before every entry the daemon queries the live Oanda bid/ask spread; if it exceeds 2× the pair's standard spread the signal is skipped and logged. Protects against news events and thin-liquidity sessions.
-- **Weekend auto-close:** at 20:00 UTC on Friday the daemon closes every open FX position at the live Oanda mid-price and sends a close email. Pair ticks are skipped entirely on Saturday and Sunday while the market is closed. This prevents positions being stopped out by the widened weekend bid/ask spread.
+| Field | Meaning |
+|-------|---------|
+| Direction | **BUY**, **SELL**, or **FLAT** (no signal) |
+| Entry | Suggested entry price |
+| Stop Loss | Hard stop — ATR × 0.4, floored at `HA_SL_MIN_PIPS` |
+| Take Profit | Wide ceiling — ATR × 3.0 from entry |
+| R:R | Risk-to-reward ratio |
+| ATR(14) 1h | 1h Average True Range — volatility measure |
+| 1h Trend | Price position relative to EMA(50) |
+| 1h RSI | 1h RSI(14) — momentum gate |
+| MACD Hist | 1h MACD histogram — building momentum gate |
+| Basis | Which pattern fired and on which bar |
 
 ---
 
-## FX Daemon (`daemon_fx.py`)
+## Signal Logic
 
-Monitors EURUSD, GBPUSD, USDJPY, and AUDUSD indefinitely, polling every 5
-minutes (configurable), and sends email alerts when a trade opens, the stop
-moves to breakeven, or the trade closes.
+### Trend gates (1h — all three must pass)
 
-### Real-time control console
+1. Price above EMA(50) for BUY; below for SELL
+2. MACD histogram positive **and increasing** for BUY; negative **and decreasing** for SELL (building MACD gate)
+3. RSI(14) above 50 for BUY; below 50 for SELL
 
-The daemon listens for control commands on TCP port **9876** (default).
-Connect with plain telnet from the same machine or, when running in Docker,
-from the host:
+### 4h agreement gate
 
-```
-telnet localhost 9876
-```
+4h close must be above/below the **4h EMA(22)** in the same direction as the
+1h bias. Trades where 1h and 4h conflict are suppressed as FLAT.
 
-```
-FX Trader  |  help=commands  quit=disconnect
+### Daily ADX gate
 
-> status
-=== FX Trader Daemon Status ===
-Entries : Active  |  Exits : Active
+Daily ADX(14) must exceed a per-pair threshold before entries are allowed:
 
-  EURUSD  [no position]
-  GBPUSD  BUY  entry=1.27350  SL=1.27100  TP=1.27800  BE=pending
-  USDJPY  [cooldown until 14:30 UTC]
-  AUDUSD  [no position]
+| Pair | ADX threshold |
+|------|--------------|
+| EURUSD | 17 |
+| GBPUSD | 25 |
+| USDJPY | 0 (exempt) |
+| AUDUSD | 18 |
 
-Open positions: 1
+### Entry patterns (5m — first match wins)
 
-> pause
-Daemon paused — entries and exits both suspended.
+| Pattern | Description |
+|---------|-------------|
+| **A** | EMA(8) crosses EMA(21) in trend direction; confirmed by RSI(7) and Stochastic |
+| **C** | 5m MACD histogram flips sign in trend direction while price is on the right side of EMA(21) |
+| **D** | 3 same-colour Heikin-Ashi candles → 1 opposing pullback → resumption; stop anchored to pullback extreme |
+| **E** *(USDJPY only)* | Supertrend(10/3.0) flip in trend direction |
 
-> be
-Breakeven queued — daemon will move all open SLs to entry.
+### Risk management
 
-> close
-Close-all queued — daemon will close all open positions at market.
-
-> resume
-Daemon resumed — entries and exits both re-enabled.
-
-> quit
-Bye.
-```
-
-When occult stops are active, each position line includes an occult tag showing which stops are broker-side vs daemon-managed:
-
-```
-  GBPUSD  BUY  entry=1.27350  SL=1.27100  TP=1.27800  BE=pending  occult[SL=daemon,TP=daemon]
-```
-
-After `materialise_sl` the SL side changes to `broker`; after `materialise_tp` the TP side changes to `broker`.
-
-**Commands:**
-
-| Command           | Effect                                                                          |
-|-------------------|---------------------------------------------------------------------------------|
-| `status`          | Show entry/exit pause state, open positions, occult status, and cooldown state  |
-| `pause`           | Suspend both new entries and automatic exits                                    |
-| `resume`          | Re-enable both entries and exits                                                |
-| `pause_entry`     | Stop entering new trades; open positions continue to be managed                 |
-| `resume_entry`    | Re-enable new trade entries                                                     |
-| `pause_exit`      | Suppress automatic position closes (SL/TP hits are logged but not acted on)     |
-| `resume_exit`     | Re-enable automatic position exits                                              |
-| `materialise_sl`  | Place real broker SL orders for every open occult-stops position                |
-| `materialise_tp`  | Place real broker TP orders for every open occult-stops position                |
-| `be`              | Move every open stop-loss to breakeven immediately                              |
-| `close`           | Close every open position at market immediately                                 |
-| `help`            | List available commands                                                         |
-| `quit`            | Disconnect                                                                      |
-
-`be`, `close`, `materialise_sl`, and `materialise_tp` wake the daemon immediately rather than waiting for the next poll, so they execute within a second or two of being issued. A close email is sent for each position closed via `close`; a BE email is sent for each position updated via `be`.
-
-The port can be changed with `FX_CTRL_PORT=<port>` in `.env`.
-
-For scripted / one-liner use there is also `fxctl.py`:
-```bash
-python fxctl.py status
-python fxctl.py pause_entry
-python fxctl.py materialise_sl
-python fxctl.py --host 192.168.1.10 status   # remote host
-```
+- **Stop loss (A/C/E):** ATR × 0.4, floored at `HA_SL_MIN_PIPS` (10 pips for EURUSD/GBPUSD/AUDUSD; 7 pips for USDJPY)
+- **Stop loss (D):** pullback candle extreme ± buffer, clamped to `HA_SL_MIN_PIPS`–`HA_SL_MAX_PIPS`
+- **Take profit:** ATR × 3.0 (wide ceiling)
+- **Trailing stop (three-phase):**
+  1. *Breakeven:* stop moves to entry once price reaches a fraction of the TP distance (70% for EURUSD; 80% for all others)
+  2. *ATR trail:* stop tracks price at ATR × SL_MULT distance
+  3. *TP extension:* if Heikin-Ashi momentum agrees, TP doubles (2× original), stop locks to 90% of TP, trail tightens to 50%
+- **Cooldown:** no new entry for **60 minutes** after a loss
+- **Spread guard:** live spread is queried before every entry; if it exceeds 2× the pair's standard spread the signal is skipped and logged
+- **Trading day gate:** FX entries are blocked on Friday, Saturday, and Sunday
+- **Session filter:** entries only fire during **07:00–16:00 UTC** (London / New York overlap)
+- **Weekend auto-close:** at 20:00 UTC on Friday the daemon closes all open FX positions ahead of weekend spread blowout
 
 ---
 
-### Email alerts
+## FX Daemon (`daemon.py`)
 
-| Event               | Sent when …                                        |
-|---------------------|----------------------------------------------------|
-| **OPEN**            | A BUY or SELL signal fires on a watched pair       |
-| **BE**              | Price reaches the breakeven trigger — stop moved to entry |
-| **CLOSE**           | Stop loss or take profit is hit                    |
-| **MANUAL CLOSE**    | `close` command sent via control console           |
-| **WEEKEND CLOSE**   | Friday ≥ 20:00 UTC — daemon closes the position ahead of weekend spread blowout |
-| **Daily Summary**   | 08:00 UTC and 20:00 UTC — open positions, month-to-date pips, account balance, and open trade P&L fetched live from Oanda |
-
-No email is sent for FLAT bars or while a position is already open.
-
-### Email setup
-
-1. Copy the template:
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Edit `.env` with your credentials:
-   ```
-   SMTP_HOST=smtp.gmail.com
-   SMTP_PORT=587
-   SMTP_USER=you@gmail.com
-   SMTP_PASS=xxxx-xxxx-xxxx-xxxx   # Gmail App Password
-   MAIL_TO=you@gmail.com
-   ```
-
-   > **Gmail users:** Generate an *App Password* at
-   > https://myaccount.google.com/apppasswords — do not use your main password.
-   > Other providers (Outlook, Fastmail, etc.) work identically; update
-   > `SMTP_HOST` and `SMTP_PORT` accordingly.
-
-3. To send to multiple recipients, comma-separate `MAIL_TO`:
-   ```
-   MAIL_TO=trader@example.com,alerts@example.com
-   ```
-
-### Oanda integration
-
-The FX daemon uses Oanda for three things: live position sizing (account balance), spread checking before every entry, and order execution in live mode. Add the following to `.env`:
-
-```
-OANDA_API_KEY=...              # personal access token from the Oanda hub
-OANDA_ACCOUNT_ID=...           # numeric account ID
-OANDA_ENV=practice             # "practice" (demo) or "live"
-OANDA_RISK_PCT=1               # % of balance to risk per trade (1 = 1%, 0.8 = 0.8%)
-FX_DATA_SOURCE=yfinance        # "yfinance" (default) or "oanda" to use Oanda as the candle feed
-FX_LIVE=false                  # true = place live Oanda market orders
-FX_OCCULT_STOPS=false          # true = enable occult stops (see below)
-```
-
-Set `FX_DATA_SOURCE=oanda` to fetch all OHLCV candles from Oanda instead of Yahoo Finance. This gives institutional-quality tick data and removes the dependency on Yahoo's public API.
-
-### Occult stops
-
-By default, every Oanda market order includes attached `stopLossOnFill` and `takeProfitOnFill` orders so the broker protects the position server-side. With occult stops enabled those attached orders are omitted: the order is placed with no visible stop or target, and the daemon itself monitors the price and closes the trade when either level is hit.
-
-**Why use this:** broker-visible stop orders can be targeted by market makers ("stop hunting") — the price briefly sweeps through a cluster of stops, triggering liquidations, then reverses. Keeping stops invisible removes that information from the order book.
-
-**Trade-offs:**
-
-| | Broker-side SL/TP (default) | Occult stops |
-|---|---|---|
-| Stop protection if daemon crashes | Yes — broker closes automatically | No — position stays open until daemon restarts |
-| Stop-hunt exposure | Yes — levels visible on broker | No — levels known only to the daemon |
-| Breakeven move | Daemon sends a modify request to Oanda | Daemon tracks in memory only; no broker request |
-| Close price | Theoretical SL/TP level | Actual fill price from the explicit close call |
-
-You can promote individual occult stops to real broker orders at any time without restarting the daemon, using the `materialise_sl` and `materialise_tp` control commands. This is useful when you want to hand the position over to the broker for protection (e.g. before a network outage) while having run in occult mode up to that point. Once materialised, the status display reflects `broker` for that side; the daemon continues to track price internally for logging, but no longer sends an explicit close order when that level is hit.
-
-**Enable via env var:**
-```
-FX_OCCULT_STOPS=true
-```
-
-**Enable via CLI flag:**
-```bash
-python daemon_fx.py --live --occult-stops
-```
-
-The startup email and every OPEN email label stop/TP levels as `[occult (daemon-managed)]` so the distinction is clear in your inbox. Occult stops only take effect in live mode (`--live` / `FX_LIVE=true`) — in paper mode there are no broker orders either way.
-
-### Trade log and restart persistence
-
-The daemon writes every OPEN, BE, and CLOSE event as a JSON line to
-`fx_trades.jsonl` (mapped to `trades.jsonl` inside the container) in the
-working directory.  On startup it replays this file to restore any open
-positions and the month-to-date pip total, so you can stop and restart the
-daemon without losing trade state.
-
-Mount `fx_trades.jsonl` as a Docker volume to ensure persistence across
-container restarts.
+Unified daemon that manages both automated signals and discretionary trades.
+Monitors EURUSD, GBPUSD, USDJPY, and AUDUSD indefinitely with
+bar-synchronised polling (wakes at each 5-minute bar boundary + 5 seconds when
+no positions are open; polls every 15 seconds when positions are open).
 
 ### Starting the daemon
 
 ```bash
-# Watch all 4 FX pairs (default), poll every 5 minutes
-python daemon_fx.py
+# Paper mode — all 4 pairs, no orders placed
+python daemon.py
 
-# Watch a single pair
-python daemon_fx.py --pair usdjpy
+# Watch specific pairs only
+python daemon.py --pair eurusd usdjpy
 
-# Custom poll interval (seconds)
-python daemon_fx.py --interval 60
+# Dry-run — log events only, no emails or broker calls
+python daemon.py --dry-run
 
-# Test without sending emails — events are logged to stdout instead
-python daemon_fx.py --dry-run
+# Live mode — place real OANDA orders
+python daemon.py --live
 
-# Live mode with occult stops (no SL/TP sent to broker)
-python daemon_fx.py --live --occult-stops
+# Live mode with occult stops (SL/TP not sent to broker)
+python daemon.py --live --occult-stops
+
+# Debug logging
+python daemon.py --log-level DEBUG
 ```
+
+`FX_PAIRS=eurusd,usdjpy,audusd` in `.env` selects pairs without a CLI flag.
 
 ### Running in the background (macOS / Linux)
 
 ```bash
-# Start in background, append output to a log file
-nohup python daemon_fx.py >> fxtrader.log 2>&1 &
-
-# Save the PID so you can stop it later
+nohup python daemon.py >> fxtrader.log 2>&1 &
 echo $! > fxtrader.pid
-
-# Check it is running
-ps -p $(cat fxtrader.pid)
 
 # Tail the log
 tail -f fxtrader.log
@@ -346,15 +242,15 @@ Create `~/Library/LaunchAgents/com.fxtrader.daemon.plist`:
   <string>com.fxtrader.daemon</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/YOUR_NAME/Downloads/fxtrader/.venv/bin/python</string>
-    <string>/Users/YOUR_NAME/Downloads/fxtrader/daemon_fx.py</string>
+    <string>/Users/YOUR_NAME/fxtrader/.venv/bin/python</string>
+    <string>/Users/YOUR_NAME/fxtrader/daemon.py</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/YOUR_NAME/Downloads/fxtrader</string>
+  <string>/Users/YOUR_NAME/fxtrader</string>
   <key>StandardOutPath</key>
-  <string>/Users/YOUR_NAME/Downloads/fxtrader/fxtrader.log</string>
+  <string>/Users/YOUR_NAME/fxtrader/fxtrader.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/YOUR_NAME/Downloads/fxtrader/fxtrader.log</string>
+  <string>/Users/YOUR_NAME/fxtrader/fxtrader.log</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -363,8 +259,6 @@ Create `~/Library/LaunchAgents/com.fxtrader.daemon.plist`:
 </plist>
 ```
 
-Then load it:
-
 ```bash
 launchctl load ~/Library/LaunchAgents/com.fxtrader.daemon.plist
 
@@ -372,104 +266,267 @@ launchctl load ~/Library/LaunchAgents/com.fxtrader.daemon.plist
 launchctl unload ~/Library/LaunchAgents/com.fxtrader.daemon.plist
 ```
 
-### FX daemon output explained
+### Real-time control console
+
+The daemon listens for control commands on TCP port **9876** (default).
 
 ```
-2026-04-11 09:15:02  INFO     Initial fetch for EURUSD=X …
-2026-04-11 09:15:08  INFO     EURUSD=X  cache seeded: 168 × 1h bars, 576 × 5m bars
-2026-04-11 09:15:09  INFO     EURUSD  OPEN BUY @ 1.08542  SL=1.08490  TP=1.08698  (5.2/15.6 pips  R:R 1:3.00)
-2026-04-11 09:20:04  INFO     EURUSD  BE triggered — SL moved to 1.08542
-2026-04-11 09:35:10  INFO     EURUSD  CLOSE BUY — close_tp @ 1.08698  P&L 15.6 pips
+telnet localhost 9876
+```
+
+```
+FX Trader  |  help=commands  quit=disconnect
+
+> status
+=== FX Trader Daemon Status ===
+Entries : Active  |  Exits : Active
+
+  EURUSD  [no position]
+  GBPUSD  BUY  entry=1.27350  SL=1.27100  TP=1.27800  BE=pending
+  USDJPY  [cooldown until 14:30 UTC]
+  AUDUSD  [no position]
+
+Discretionary (1):
+  id=12345  GBPUSD  BUY  entry=1.27200  SL=1.27000  TP=1.27800  [managed]
+
+> register 12345
+Register queued for trade 12345.
+
+> stoploss 12345 1.27050
+SL update queued for trade 12345.
+
+> trades
+=== Open OANDA Trades (2) ===
+  id=12344  GBP_USD  BUY  entry=1.27350  SL=1.27100  TP=1.27800  [managed]
+  id=12345  GBP_USD  BUY  entry=1.27200  SL=1.27050  TP=1.27800  [managed]
+
+> close
+Close queued.
+
+> quit
+Bye.
+```
+
+**Commands:**
+
+| Command | Effect |
+|---------|--------|
+| `status` | Show entry/exit pause state, open positions, and cooldown state |
+| `pause` | Suspend both new entries and automatic exits |
+| `resume` | Re-enable both entries and exits |
+| `pause_entry` | Stop entering new trades; open positions continue to be managed |
+| `resume_entry` | Re-enable new trade entries |
+| `pause_exit` | Suppress automatic position closes (SL/TP hits are logged but not acted on) |
+| `resume_exit` | Re-enable automatic position exits |
+| `register <id>` | Register an open OANDA trade ID for daemon trailing-stop management |
+| `stoploss <id> <sl>` | Override the stop-loss price for a discretionary trade |
+| `takeprofit <id> <tp>` | Override the take-profit price for a discretionary trade |
+| `deregister <id>` | Stop managing a trade (leaves position open, removes daemon tracking) |
+| `close [<id>]` | Close one position by trade ID, or all positions if no ID given |
+| `be` | Move every open stop-loss to breakeven immediately |
+| `materialise_sl` | Place real broker SL orders for every occult-stops position |
+| `materialise_tp` | Place real broker TP orders for every occult-stops position |
+| `trades` | List all open OANDA trades with SL/TP, flagged if daemon-managed |
+| `help` | List available commands |
+| `quit` | Disconnect |
+
+`be`, `close`, `materialise_sl`, and `materialise_tp` wake the daemon
+immediately rather than waiting for the next poll.
+
+The port can be changed with `FX_CTRL_PORT=<port>` in `.env`.
+
+For scripted use there is also `fxctl.py`:
+```bash
+python fxctl.py status
+python fxctl.py pause_entry
+python fxctl.py materialise_sl
+python fxctl.py --host 192.168.1.10 status   # remote host
+```
+
+### Discretionary trade management
+
+Any position opened manually on OANDA can be handed to the daemon for
+automated trailing-stop management:
+
+1. Open the trade manually on OANDA (web platform or app)
+2. Note the trade ID (visible in the OANDA interface or via `trades` command)
+3. Register it: `register <id>`
+
+The daemon will fetch the current price, compute ATR from recent H1 bars, and
+apply the same three-phase trailing-stop logic used for automated trades. Use
+`stoploss` and `takeprofit` to override the computed levels if needed.
+
+To stop managing a trade without closing it, use `deregister <id>`.
+
+### Email alerts
+
+| Event | Sent when … |
+|-------|-------------|
+| **OPEN** | A BUY or SELL signal fires on a watched pair |
+| **BE** | Price reaches the breakeven trigger — stop moved to entry |
+| **CLOSE** | Stop loss or take profit is hit |
+| **MANUAL CLOSE** | `close` command sent via control console |
+| **WEEKEND CLOSE** | Friday ≥ 20:00 UTC — daemon closes positions ahead of weekend spread blowout |
+| **Daily Summary** | 08:00 UTC and 20:00 UTC — open positions, month-to-date pips, account balance, and open trade P&L |
+
+### Trade log and restart persistence
+
+The daemon writes every OPEN, BE, and CLOSE event as a JSON line to
+`fx_trades.jsonl` in the working directory. On startup it replays this file
+to restore open positions and the month-to-date pip total, so you can stop and
+restart without losing trade state.
+
+Mount `fx_trades.jsonl` as a Docker volume to ensure persistence across
+container restarts.
+
+### Occult stops
+
+By default, every OANDA market order includes attached `stopLossOnFill` and
+`takeProfitOnFill` orders so the broker protects the position server-side.
+With occult stops enabled those orders are omitted: the daemon itself monitors
+price and closes the trade when either level is hit.
+
+**Why use this:** broker-visible stop orders can be targeted by market makers
+("stop hunting"). Keeping stops invisible removes that information from the
+order book.
+
+| | Broker-side SL/TP (default) | Occult stops |
+|---|---|---|
+| Protection if daemon crashes | Yes — broker closes automatically | No — position stays open |
+| Stop-hunt exposure | Yes — levels visible on broker | No — known only to daemon |
+| Breakeven move | Daemon sends modify request to OANDA | Tracked in memory only |
+
+Use `materialise_sl` / `materialise_tp` to promote occult stops to real broker
+orders at any time (e.g. before a network outage).
+
+**Enable:**
+```
+FX_OCCULT_STOPS=true   # .env
+python daemon.py --live --occult-stops   # CLI flag
 ```
 
 ---
 
-## Crypto Daemon (`daemon_crypto.py`)
+## OANDA Integration
 
-Monitors BTCUSD continuously, places orders on Binance (via OCO), and sends
-email alerts on OPEN / BE / CLOSE events. All money amounts are in USD
-(one "pip" = $1.00 for BTC).
-
-### Additional .env variables
+The daemon uses OANDA for: live position sizing (account NAV), spread checking
+before every entry, order execution in live mode, and all historical candle
+data. Add the following to `.env`:
 
 ```
-BINANCE_API_KEY=...
-BINANCE_API_SECRET=...
-BINANCE_TESTNET=false          # true = paper-trade on Binance testnet
-CRYPTO_RISK_PCT=1              # % of balance to risk per trade (1 = 1%, 0.8 = 0.8%)
-CRYPTO_TRADE_SIZE_PCT=10       # % of balance as hard cap on notional per trade
+OANDA_API_KEY=...              # personal access token from the OANDA hub
+OANDA_ACCOUNT_ID=...           # numeric account ID
+OANDA_ENV=practice             # "practice" (demo) or "live"
+OANDA_RISK_PCT=1               # % of NAV to risk per trade (1 = 1%, 0.8 = 0.8%)
+FX_LIVE=false                  # true = place live OANDA market orders
+FX_OCCULT_STOPS=false          # true = enable occult stops
 ```
 
-### Starting the crypto daemon
+---
 
-```bash
-# Monitor BTCUSD, poll every 5 minutes
-python daemon_crypto.py
+## Email Setup
 
-# Shorter poll interval
-python daemon_crypto.py --interval 60
-
-# Dry-run — log events, do not send emails or place Binance orders
-python daemon_crypto.py --dry-run
+```
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=you@gmail.com
+SMTP_PASS=xxxx-xxxx-xxxx-xxxx   # Gmail App Password
+MAIL_TO=you@gmail.com
 ```
 
-### Running in the background
+> **Gmail users:** Generate an *App Password* at
+> https://myaccount.google.com/apppasswords — do not use your main password.
 
-```bash
-nohup python daemon_crypto.py >> cryptotrader.log 2>&1 &
-echo $! > cryptotrader.pid
-kill $(cat cryptotrader.pid)
+To send to multiple recipients, comma-separate `MAIL_TO`:
+```
+MAIL_TO=trader@example.com,alerts@example.com
 ```
 
 ---
 
 ## Backtesting (`backtest.py`)
 
-Walk-forward simulation of the strategy against historical data.
-Each pair's backtest uses the parameters from its own indicator file,
-so changes there are reflected immediately in the next run.
+Walk-forward simulation against the OANDA parquet store. Uses M1 within-bar
+simulation for accurate SL/TP ordering (5 M1 bars stepped for each M5 window).
+Each pair's parameters come from its indicator file.
+
+### First run
 
 ```bash
-# Scalp mode — 60 days, 5m entry bars (single pair)
+# Seed data and run backtest in one step
+python backtest.py --pair eurusd --seed
+```
+
+`--seed` calls `datalib.update_all()` before running.
+
+### Common usage
+
+```bash
+# Single pair, scalp mode (5m entry bars, 90d M1 data)
 python backtest.py --pair eurusd
 
-# Long mode — 730 days, 1h entry bars (larger sample)
+# Long mode (1h entry bars, 730d H1 data)
 python backtest.py --pair eurusd --long
 
-# BTCUSD
-python backtest.py --pair btcusd
-
-# All pairs, scalp mode — prints a combined summary table
+# All four active pairs — prints a combined summary table
 python backtest.py --all
 
 # All pairs, long mode
 python backtest.py --all --long
 
-# Include position sizing (requires account size and risk %)
+# Skip data update (use stored data as-is)
+python backtest.py --all --no-update
+
+# Include position sizing output
 python backtest.py --pair eurusd --account 10000 --risk 1.0
+
+# Evaluate EURJPY (candidate pair — not in active trading)
+python backtest.py --pair eurjpy
 ```
 
 Results are printed as a table and saved to `{pair}_backtest_trades.csv`.
 
 ---
 
-## Data & Caching
+## Docker
 
-| Mode             | 1h fetch  | 5m fetch | Refresh strategy                  |
-|------------------|-----------|----------|-----------------------------------|
-| Interactive      | 60 d      | 5 d      | Full download every run           |
-| Daemon (startup) | 7 d       | 2 d      | Compact initial seed              |
-| Daemon (running) | last 3 h  | last 15 m| Incremental — dedup & append      |
+### Build and push
 
-By default all OHLCV data comes from Yahoo Finance (`yfinance`). Set
-`FX_DATA_SOURCE=oanda` in `.env` to use the Oanda REST API instead — the
-daemon will fetch candles from `api-fxpractice.oanda.com` (or
-`api-fxtrade.oanda.com` when `OANDA_ENV=live`). Both sources produce the same
-DataFrame shape; the rest of the pipeline is unchanged.
+```bash
+bash build-push.sh
+```
 
-Yahoo Finance data is for indicative purposes only and may have gaps or slight
-inaccuracies. Oanda candle data is suitable as a feed alongside live order
-execution.
+Builds `Dockerfile.fx` for `linux/amd64`, saves a tar, SCPs to the deploy
+host, and loads it there. Credentials are read from `.env.deploy`.
+
+### Running with Docker Compose
+
+```bash
+docker compose up -d
+```
+
+The compose file mounts three volumes:
+
+| Host path | Container path | Purpose |
+|-----------|---------------|---------|
+| `/data/fxtrader/fx_trades.jsonl` | `/app/fx_trades.jsonl` | Trade log — persistent state |
+| `/data/fxtrader/fxtrader.log` | `/app/fxtrader.log` | Daemon log |
+| `/data/fxtrader/oanda` | `/app/data/oanda` | OANDA parquet store |
+
+Seed the parquet store on the host before first run:
+```bash
+# On the deploy host, with credentials in .env
+python datalib.py seed
+```
+
+Or mount an already-seeded store directory from another machine.
+
+Override the default command in `docker-compose.yml` to pass flags:
+```yaml
+command: ["--live"]
+command: ["--live", "--occult-stops"]
+command: ["--pair", "eurusd", "usdjpy"]
+```
 
 ---
 
@@ -477,10 +534,17 @@ execution.
 
 **No signal generated**
 - The 1h bias may be FLAT — all three 1h gates must align simultaneously.
-- The 4h EMA(22) gate may be blocking — the 4h direction must agree with the 1h direction.
-- The session filter blocks FX entries outside 07:00–16:00 UTC.
-- ATR may be below the floor (2-pip / $50 BTC minimum — market too quiet).
-- The spread guard may have blocked the entry — check the log for `signal skipped — spread X.X pips exceeds Y.Y pip threshold`. This is expected during news releases (NFP, FOMC, CPI) and at session open/close when liquidity is thin.
+- The 4h EMA(22) gate may be blocking — 4h direction must agree with 1h.
+- The daily ADX gate may be blocking — check `python datalib.py verify <pair>` to confirm daily data is seeded.
+- The trading day gate blocks FX entries on Friday, Saturday, and Sunday.
+- The session filter blocks entries outside 07:00–16:00 UTC.
+- The spread guard may have blocked the entry — check the log for `signal skipped — spread X.X pips exceeds threshold`.
+
+**`FileNotFoundError: No data for EURUSD M1`**
+- The parquet store has not been seeded. Run `python datalib.py seed`.
+
+**`IndexError: index 14 is out of bounds`**
+- A parquet file exists but has too few rows for indicator warmup (less than 14 bars). Delete the file and re-seed: `rm data/oanda/<pair>_D.parquet && python datalib.py seed <pair>`.
 
 **Emails not arriving**
 - Run with `--dry-run` first to confirm signals are firing.
@@ -488,17 +552,11 @@ execution.
 - Gmail users: ensure you are using an App Password, not your account password.
 - Check your spam folder.
 
-**Binance orders not placed (crypto daemon)**
-- Confirm `BINANCE_API_KEY` and `BINANCE_API_SECRET` are set in `.env`.
-- Check `BINANCE_TESTNET` — if `true`, orders go to the testnet (paper trading only).
-- Run `--dry-run` to verify signal logic without touching Binance.
+**OANDA orders not placed**
+- Confirm `OANDA_API_KEY`, `OANDA_ACCOUNT_ID`, and `FX_LIVE=true` are set in `.env`.
+- Check `OANDA_ENV` — if `practice`, orders go to the demo account.
+- Run `--dry-run` to verify signal logic without placing orders.
 
-**`RuntimeError: No data returned`**
-- Yahoo Finance occasionally rate-limits or returns empty responses.
-  The daemon logs a warning and retries on the next poll; the interactive
-  script exits with the error message.  Wait a minute and try again.
-
-**`IndexError` on startup**
-- The cache needs at least 30 bars before indicators are computed.
-  This can happen if you start the daemon outside market hours when
-  yfinance returns very few recent bars.  Try again during market hours.
+**Daemon does not restart after crash**
+- Check `fxtrader.log` for the error.
+- If a position was open when the crash occurred, use `register <id>` after restart to resume management.
