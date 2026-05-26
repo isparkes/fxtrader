@@ -41,6 +41,7 @@ INSTRUMENTS: dict[str, str] = {
     "gbpusd": "GBP_USD",
     "usdjpy": "USD_JPY",
     "audusd": "AUD_USD",
+    "eurjpy": "EUR_JPY",
 }
 
 

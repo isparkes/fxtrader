@@ -108,6 +108,7 @@ STANDARD_SPREADS: dict[str, float] = {
     "gbpusd": 1.5,
     "usdjpy": 2.0,
     "audusd": 1.5,
+    "eurjpy": 1.5,
 }
 
 # ── Constants ─────────────────────────────────────────────────────────────────

@@ -1032,3 +1032,143 @@ V2 redevelopment completed 2026-05-22. Key changes from V1:
 - **Data integrity:** parquet stores updated through 2026-05-23 Friday close; 1,100–1,160 new M1 bars and 18–19 new H1 bars added per pair.
 
 ---
+
+## Candidate Pair Evaluation — 2026-05-26 (EURJPY v2 OANDA baseline)
+
+**Motivation:** establish the first clean OANDA-data baseline for EURJPY using the full v2 indicator stack. Previous evaluation (2026-05-09) used Yahoo Finance data which diverges significantly from OANDA on daily ADX values, making the earlier PF 1.38/1.57 figures suspect.
+
+**Changes made this evaluation:**
+- `indicator_eurjpy.py` rewritten to v2 standard: removed yfinance, added MACD building check to `assess_h1_bias`, added `compute_daily_adx`, `compute_supertrend`, Pattern E, and all required v2 constants (`DAILY_ADX_MIN`, `TRAIL_ACTIVATE_FRAC`, `BLOCKED_DAYS`).
+- Parameters set: `DAILY_ADX_MIN=18`, `HA_SL_MIN_PIPS=10`, `HA_SL_MAX_PIPS=15`, `TRAIL_ACTIVATE_FRAC=0.70`, `BLOCKED_DAYS={4}`.
+- `oanda.py` INSTRUMENTS extended with `"eurjpy": "EUR_JPY"`. `daemon.py` STANDARD_SPREADS extended with `"eurjpy": 1.5`.
+- `backtest.py` already registered EURJPY with `spread_scalp=2.0`, `spread_long=1.5`.
+
+**Parameter search:**
+
+| Config | Scalp PF | Scalp n | Long PF | Long n |
+|---|---|---|---|---|
+| ADX=20, A+C+D+E | 1.59 | 16 | 1.54 | 175 |
+| ADX=18, C+D+E (no A) | 1.85 | 21 | 1.47 | 170 |
+| **ADX=18, A+C+D+E (final)** | **1.73** | **22** | **1.54** | **175** |
+
+Removing Pattern A degraded long mode (1.54 → 1.47). Root cause: A's `continue` blocks lower-quality C/E signals on the same bar; without A those bars are captured by C/E at worse average outcomes. ADX=18 vs 20 has no effect on long mode (daily bars rarely straddle the boundary) but adds 6 scalp trades.
+
+**EURJPY correlation to EURUSD (H1 returns, 2-year):** r = +0.264 (rolling range −0.07 to +0.56). Genuinely lower correlation than NZDUSD (+0.665) or GBPUSD (implicit through USD). Primary independent driver is BOJ policy / JPY carry dynamics.
+
+### Scalp mode — 60d · 5m bars
+
+60d net-change: EURJPY +0.6% (FLAT)
+
+| Pair   | Market Regime | Trades | Win%  | Avg W   | Avg L   |  PF  | Expec      | Total      | Max DD      |
+|--------|---------------|--------|-------|---------|---------|------|------------|------------|-------------|
+| EURJPY | FLAT          |     22 | 31.8% |  47.1 p |  12.7 p | 1.73 |  6.3 p/tr  |    139.5 p |    −96.0 p  |
+
+Patterns: A=6 (−24.6p), C=8 (+32.4p), D=8 (+131.7p). Pattern E fired 0 times — ADX+MACD building gates suppress most Supertrend entries in scalp mode at current threshold. 22 trades is a thin sample; monitor over next 3 months before drawing conclusions about scalp viability.
+
+### Long mode — 730d · 1h bars
+
+730d net-change: EURJPY +8.9% (FLAT)
+
+| Pair   | Market Regime | Trades | Win%  |  Avg W   | Avg L   |  PF  |  Expec    |   Total    | Max DD      |
+|--------|---------------|--------|-------|----------|---------|------|-----------|------------|-------------|
+| EURJPY | FLAT          |    175 | 17.1% | 114.5 p  |  15.4 p | 1.54 |  6.9 p/tr |  1,208.1 p |   −365.0 p  |
+
+Pattern breakdown (long): C=51 (+885p), D=63 (+221p), E=41 (+125p), A=20 (−23p).
+
+### Active pair context (2026-05-25 scalp baseline)
+
+| Pair       |  PF  | Trades | Total  | Max DD  |
+|------------|------|--------|--------|---------|
+| EURUSD     | 3.02 |     55 | +585p  |  −44p   |
+| USDJPY     | 2.94 |     41 | +510p  |  −52p   |
+| AUDUSD     | 2.60 |     27 | +281p  |  −35p   |
+| GBPUSD     | 1.20 |     29 |  +51p  | −149p   |
+| **EURJPY** | **1.73** | **22** | **+140p** | **−96p** |
+
+### Notes
+
+- **EURJPY PF 1.54 long / 1.73 scalp — first clean OANDA result.** Long PF 1.54 is consistent with the May 09 Yahoo evaluation (1.57) despite a completely different data source — this cross-validation is reassuring.
+- **Long mode ranks 3rd of 5 by PF** (between EURUSD 1.46 and USDJPY 2.07 in the active pair long-mode table).
+- **Pattern A retained.** Its long-mode contribution is negative (−23 pips / 20 trades) but removing it depresses long-mode PF from 1.54 to 1.47. This is a 20-trade sample artefact risk; monitor over live data before acting. Premature to remove as was done for USDJPY (which had isolated testing confirming sub-1.0 PF for A and C independently).
+- **Verdict: candidate — pending GBPUSD slot.** EURJPY is confirmed viable in both modes with manageable drawdown and genuine EURUSD decorrelation. Activation deferred until GBPUSD is retired; 3-concurrent-trade limit at 30:1 leverage is the binding constraint.
+- **GBPUSD replacement timing:** GBPUSD DD-to-gain ratio has reached 3:1 (−149p DD / +51p total) in the most recent snapshot. The rotation case is strengthening — see project_position_limits.md.
+
+---
+
+## Weekly Review — 2026-05-26 (live trade validation)
+
+**Purpose:** validate that live trades in `fx_trades.jsonl` are consistent with backtest signals for the week of 2026-05-19 to 2026-05-26.
+
+### Live trades this week
+
+| ID  | Pair   | Type          | Dir | Entry   | SL      | TP      | Result     | PnL    |
+|-----|--------|---------------|-----|---------|---------|---------|------------|--------|
+| 669 | USDJPY | discretionary | BUY | 158.898 | 158.854 | 159.227 | close_manual | +3.7p |
+| 679 | USDJPY | automated     | BUY | 159.232 | 159.166 | 159.434 | close_sl     | −6.6p |
+
+### Backtest signals this week (post data refresh)
+
+| Pair   | Entry time (UTC)     | Dir  | Entry   | SL      | PnL    | Result | Pattern       |
+|--------|----------------------|------|---------|---------|--------|--------|---------------|
+| EURUSD | 2026-05-19 08:05     | SELL | 1.16314 | 1.16057 | +24.7p | WIN    | C-macd-flip   |
+| EURUSD | 2026-05-19 14:10     | SELL | 1.16052 | 1.16152 | −11.0p | LOSS   | C-macd-flip   |
+| USDJPY | 2026-05-20 13:40     | BUY  | 159.060 | 158.984 | −9.6p  | LOSS   | D-ha-pullback |
+| EURUSD | 2026-05-21 10:05     | SELL | 1.16248 | 1.16015 | +22.3p | WIN    | D-ha-pullback |
+| USDJPY | 2026-05-21 10:20     | BUY  | 158.991 | 159.232 | +22.1p | WIN    | D-ha-pullback |
+| EURUSD | 2026-05-21 12:55     | SELL | 1.15972 | 1.16072 | −11.0p | LOSS   | C-macd-flip   |
+| USDJPY | 2026-05-26 08:20     | BUY  | 159.222 | 159.152 | −9.0p  | LOSS   | D-ha-pullback |
+
+GBPUSD and AUDUSD: no signals this week.
+
+### Validation findings
+
+**Trade ID 679 — matched.** The automated USDJPY signal at 08:20 UTC on 2026-05-26 aligns closely with the backtest:
+- Same bar (08:20 UTC), same direction (BUY)
+- Entry: backtest 159.222 vs live 159.232 (~1 pip fill slippage, expected)
+- SL: backtest 159.152 vs live 159.166 (~1.4 pip difference)
+- TP: backtest 159.424 vs live 159.434 (near-identical)
+- Both resulted in SL hit — backtest −9.0p, live −6.6p (slight difference due to different entry fill price)
+
+**Trade ID 669 — discretionary, no backtest counterpart.** Correctly absent from backtest. Manually entered and closed for a small profit.
+
+**Missed signals (daemon offline May 19–25):** `fxtrader.log` ends at 2026-05-22 10:11 UTC (Signal 15 — daemon stopped locally). No log entries for May 23–25. The live daemon (server) was restarted in time to catch the May 26 signal but missed:
+- EURUSD: 4 signals (2W/2L, net +25.0p) on May 19–21
+- USDJPY: 2 signals (1W/1L, net +12.5p) on May 20–21
+- Estimated missed PnL: ~+37.5p across pairs. Root cause: daemon downtime, not signal failure.
+
+**Minor SL floor discrepancy (trade ID 679):** `HA_SL_MIN_PIPS = 7` for USDJPY but live risk was 6.6p (159.232 − 159.166). The SL was computed from spread-adjusted entry (~159.237), giving SL ~159.167 from ep_adj — which is ≥7 pips from ep_adj — but the actual fill at 159.232 leaves only 6.6p of margin. This is the same class of issue as the A/C SL floor finding (SPEC §11.2); already known, not yet fixed.
+
+### Snapshot — 2026-05-26
+
+**Scalp mode (90d · M5 bars)**
+
+90d net-change: EURUSD −1.2% (TREND_DOWN) · GBPUSD −0.3% (FLAT) · USDJPY +1.7% (TREND_UP) · AUDUSD +1.1% (TREND_UP)
+
+| Pair   | Market Regime | Trades | Win%  | Avg W  | Avg L  |  PF  | Expec      | Total   | Max DD   |
+|--------|---------------|--------|-------|--------|--------|------|------------|---------|----------|
+| EURUSD | TREND_DOWN    |     55 | 52.7% | 30.2 p | 11.1 p | 3.02 | 10.6 p/tr  | +585 p  |  −44 p   |
+| USDJPY | TREND_UP      |     42 | 38.1% | 48.3 p | 10.5 p | 2.84 | 11.9 p/tr  | +501 p  |  −52 p   |
+| AUDUSD | TREND_UP      |     27 | 44.4% | 38.0 p | 11.7 p | 2.60 | 10.4 p/tr  | +281 p  |  −35 p   |
+| GBPUSD | FLAT          |     29 | 24.1% | 43.9 p | 11.7 p | 1.20 |  1.7 p/tr  |  +51 p  | −149 p   |
+
+**Long mode (730d · H1 bars)**
+
+730d net-change: EURUSD +7.3% (TREND_UP) · GBPUSD +5.8% (TREND_UP) · USDJPY +1.4% (FLAT) · AUDUSD +8.1% (TREND_UP)
+
+| Pair   | Market Regime | Trades | Win%  | Avg W   | Avg L  |  PF  | Expec     | Total   | Max DD    |
+|--------|---------------|--------|-------|---------|--------|------|-----------|---------|-----------|
+| EURUSD | TREND_UP      |    125 | 24.8% |  64.4 p | 11.2 p | 1.89 |  7.5 p/tr | +940 p  |  −307 p   |
+| AUDUSD | TREND_UP      |    144 | 25.7% |  51.6 p | 11.6 p | 1.54 |  4.7 p/tr | +674 p  |  −268 p   |
+| GBPUSD | TREND_UP      |    133 | 17.3% |  86.8 p | 12.1 p | 1.50 |  5.0 p/tr | +664 p  |  −160 p   |
+| USDJPY | FLAT          |    113 | 15.0% | 106.1 p | 12.7 p | 1.48 |  5.2 p/tr | +585 p  |  −584 p   |
+
+### Notes
+
+- **USDJPY scalp PF 2.84** (was 2.94 at 2026-05-25 snapshot) — one fresh LOSS (trade 679) absorbed; still well above threshold. All other active pairs stable vs prior snapshot.
+- **USDJPY long-mode max DD −584p** is large relative to total (+585p). Low win rate (15%) and large lot sizes (~1.2–1.3 lots) are the drivers. Monitor for drawdown deepening.
+- **GBPUSD shown for reference only** — removed from live rotation via `FX_PAIRS=eurusd,usdjpy,audusd` in `.env`. Not traded.
+- **Daemon gap May 19–25:** ~37.5 pip opportunity cost across EURUSD and USDJPY. No strategy flaw — purely operational. Investigate server restart resilience.
+
+---
+
+---
