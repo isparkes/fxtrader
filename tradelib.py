@@ -227,6 +227,94 @@ def check_position_events(
     return events
 
 
+# ── Registration-level calculation ───────────────────────────────────────────
+
+def calc_registration_levels(
+    direction:     str,
+    entry_price:   float,
+    current_price: float,
+    atr:           float,
+    ind,
+    pv:            float,
+) -> tuple[float, float, bool, float]:
+    """
+    Compute SL, TP, be_activated, and best_price when registering an existing
+    discretionary trade for daemon management.
+
+    Applies the same trail model as check_position_events so a trade that opened
+    while the daemon was offline is caught up to its correct state.
+
+    Returns (sl, tp, be_activated, best_price).
+    """
+    sign = 1 if direction == "BUY" else -1
+    sl   = entry_price - sign * atr * ind.ATR_SL_MULT
+    tp   = entry_price + sign * atr * ind.ATR_TP_MULT
+
+    trail_frac   = getattr(ind, "TRAIL_ACTIVATE_FRAC", _DEFAULT_TRAIL_ACTIVATE_FRAC)
+    tp_dist_pips = abs(tp - entry_price) / pv
+    prog_pips    = (
+        (current_price - entry_price) if direction == "BUY"
+        else (entry_price - current_price)
+    ) / pv
+
+    be_activated = False
+    best_price   = current_price
+
+    if prog_pips >= tp_dist_pips * trail_frac:
+        be_activated = True
+        trail_dist   = atr * ind.ATR_SL_MULT
+        trailing_sl  = (
+            current_price - trail_dist if direction == "BUY"
+            else current_price + trail_dist
+        )
+        sl = (
+            max(entry_price, trailing_sl) if direction == "BUY"
+            else min(entry_price, trailing_sl)
+        )
+    elif (
+        (direction == "BUY"  and current_price <= sl) or
+        (direction == "SELL" and current_price >= sl)
+    ):
+        sl = (
+            current_price - atr * ind.ATR_SL_MULT if direction == "BUY"
+            else current_price + atr * ind.ATR_SL_MULT
+        )
+
+    return sl, tp, be_activated, best_price
+
+
+# ── Fill-slippage SL adjustment ───────────────────────────────────────────────
+
+def adjust_sl_for_fill(
+    fill_price:  float,
+    stop_loss:   float,
+    take_profit: float,
+    direction:   str,
+    ind,
+    pv:          float,
+) -> tuple[float, float, float, float]:
+    """
+    Recalculate SL, risk_pips, reward_pips, and rr_ratio after a fill price
+    that differs from the signal price.
+
+    If the SL distance from fill exceeds HA_SL_MAX_PIPS (the pair's cap), the
+    SL is moved to exactly HA_SL_MAX_PIPS from fill so risk stays within bounds.
+
+    Returns (stop_loss, risk_pips, reward_pips, rr_ratio).
+    """
+    sl_max = getattr(ind, "HA_SL_MAX_PIPS", None)
+    if sl_max is not None and abs(fill_price - stop_loss) / pv > sl_max:
+        sl_dist   = sl_max * pv
+        stop_loss = round(
+            (fill_price - sl_dist) if direction == "BUY"
+            else (fill_price + sl_dist), 5,
+        )
+    risk_pips   = round(abs(fill_price - stop_loss) / pv, 1)
+    reward_pips = round(abs(take_profit - fill_price) / pv, 1)
+    rr_ratio    = round(reward_pips / risk_pips, 2) if risk_pips > 0 else 0.0
+    return stop_loss, risk_pips, reward_pips, rr_ratio
+
+
 # ── Position sizing ───────────────────────────────────────────────────────────
 
 def calc_units(

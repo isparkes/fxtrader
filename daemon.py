@@ -950,21 +950,15 @@ def _open_automated(
                 ind         = PAIR_INDICATORS[pair]
                 pv          = ind.pip_value(pair)
                 entry_price = round(float(fill_str), 5)
-                sl_max      = getattr(ind, "HA_SL_MAX_PIPS", None)
-                if sl_max and abs(entry_price - stop_loss) / pv > sl_max:
-                    sl_dist   = sl_max * pv
-                    stop_loss = round(
-                        (entry_price - sl_dist) if signal.direction == "BUY"
-                        else (entry_price + sl_dist), 5,
-                    )
-                    if not occult_stops:
-                        try:
-                            oanda.modify_trade_sl(trade_id, stop_loss, pair)
-                        except Exception:
-                            pass
-                risk_pips   = round(abs(entry_price - stop_loss) / pv, 1)
-                reward_pips = round(abs(signal.take_profit - entry_price) / pv, 1)
-                rr_ratio    = round(reward_pips / risk_pips, 2) if risk_pips > 0 else 0.0
+                old_sl      = stop_loss
+                stop_loss, risk_pips, reward_pips, rr_ratio = tradelib.adjust_sl_for_fill(
+                    entry_price, stop_loss, signal.take_profit, signal.direction, ind, pv,
+                )
+                if stop_loss != old_sl and not occult_stops:
+                    try:
+                        oanda.modify_trade_sl(trade_id, stop_loss, pair)
+                    except Exception:
+                        pass
         except Exception as exc:
             log.error("%s  OANDA order failed — will retry next poll: %s", pair.upper(), exc)
             return state
@@ -1055,10 +1049,6 @@ def _register_trade(
     except Exception as exc:
         log.warning("%s  ATR fetch failed (%s) — using %.4f", pair.upper(), exc, atr)
 
-    sign = 1 if direction == "BUY" else -1
-    sl   = entry_price - sign * atr * ind.ATR_SL_MULT
-    tp   = entry_price + sign * atr * ind.ATR_TP_MULT
-
     # Catch up if price has moved since entry
     try:
         price_data    = oanda.get_price(pair)
@@ -1066,24 +1056,9 @@ def _register_trade(
     except Exception:
         current_price = entry_price
 
-    trail_frac   = getattr(ind, "TRAIL_ACTIVATE_FRAC", 0.80)
-    tp_dist_pips = abs(tp - entry_price) / pv
-    prog_pips    = ((current_price - entry_price) if direction == "BUY"
-                    else (entry_price - current_price)) / pv
-
-    be_activated = False
-    best_price   = current_price
-
-    if prog_pips >= tp_dist_pips * trail_frac:
-        be_activated = True
-        trail_dist   = atr * ind.ATR_SL_MULT
-        trailing_sl  = current_price - trail_dist if direction == "BUY" else current_price + trail_dist
-        sl = (max(entry_price, trailing_sl) if direction == "BUY"
-              else min(entry_price, trailing_sl))
-    elif (direction == "BUY" and current_price <= sl) or (direction == "SELL" and current_price >= sl):
-        sl = (current_price - atr * ind.ATR_SL_MULT if direction == "BUY"
-              else current_price + atr * ind.ATR_SL_MULT)
-
+    sl, tp, be_activated, best_price = tradelib.calc_registration_levels(
+        direction, entry_price, current_price, atr, ind, pv,
+    )
     risk_pips   = abs(entry_price - sl) / pv
     reward_pips = abs(tp - entry_price) / pv
     rr_ratio    = reward_pips / risk_pips if risk_pips > 0 else 0.0

@@ -15,7 +15,7 @@ against historical data via the walk-forward backtest.
 | `indicator_audusd.py` | Signal logic and parameters for AUDUSD |
 | `oanda.py` | OANDA REST API v20 wrapper — account summary, live pricing, order execution, and paginated candle data |
 | `daemon.py` | Unified long-running daemon — automated signals + discretionary trade management + email alerts |
-| `tradelib.py` | Single source of truth: Position dataclass, three-phase trailing stop, position sizing |
+| `tradelib.py` | Single source of truth: Position dataclass, three-phase trailing stop, position sizing, fill-slippage SL adjustment, discretionary trade registration levels |
 | `datalib.py` | Persistent OANDA parquet store (M1/H1/D per pair) |
 | `mailer.py` | SMTP email helper |
 | `tradelog.py` | Append-only trade journal — persists positions across daemon restarts |

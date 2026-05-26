@@ -262,6 +262,14 @@ class Signal:
     direction, entry_price, stop_loss, take_profit
     atr, risk_pips, reward_pips, rr_ratio
     timestamp, entry_basis, bar_time
+
+# Fill-slippage SL adjustment — recalculates SL/risk/reward after actual fill
+# differs from signal price; caps SL at HA_SL_MAX_PIPS if exceeded
+def adjust_sl_for_fill(fill_price, stop_loss, take_profit, direction, ind, pv) -> tuple[float, float, float, float]
+
+# Discretionary trade catch-up — computes SL, TP, be_activated, best_price at
+# registration, applying the same trail model to account for in-flight price movement
+def calc_registration_levels(direction, entry_price, current_price, atr, ind, pv) -> tuple[float, float, bool, float]
 ```
 
 ### 6.3 `daemon.py` — Unified Daemon
@@ -674,6 +682,7 @@ DRAWDOWN_HALT_PCT    3.0        # halt entries when session loss % exceeds this 
 | 2026-05-25 | extend_tp log replay | extend_tp events now persisted with sl/tp fields; replayed correctly on restart |
 | 2026-05-25 | Signal suppression on order failure | last_signal_bar no longer set when _open_automated() raises an exception |
 | 2026-05-25 | Threading safety | _LOG_LOCK serialises JSONL writes; _STATE_LOCK guards ctrl/states/managed between control thread and main loop |
+| 2026-05-26 | `adjust_sl_for_fill` + `calc_registration_levels` extracted into tradelib | Both were inlined in daemon.py; moved to tradelib so all trade lifecycle logic has a single source of truth (§5.1 / §6.2 design goal) |
 
 ---
 
