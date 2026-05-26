@@ -481,7 +481,7 @@ def compute_sl_tp(
         tp      = entry_p - atr * ATR_TP_MULT
     return entry_p, sl, tp
 
-def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD=X") -> Signal:
+def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD=X", spread_pips: float = 0.0) -> Signal:
     """
     Combine the 1h bias and the 5m entry trigger into a Signal dataclass.
 
@@ -513,20 +513,21 @@ def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD=X")
     ep      = entry["price"]
     pattern = entry.get("pattern", "")
     pv      = pip_value(symbol)
+    ep_adj  = ep + spread_pips * pv if direction == "BUY" else ep - spread_pips * pv
 
     if pattern == "D-ha-pullback":
         extreme     = entry["pullback_extreme"]
-        raw_sl_pips = abs(ep - extreme) / pv + HA_SL_BUFFER_PIPS
+        raw_sl_pips = abs(ep_adj - extreme) / pv + HA_SL_BUFFER_PIPS
         sl_pips     = max(HA_SL_MIN_PIPS, min(HA_SL_MAX_PIPS, raw_sl_pips))
         sl_dist     = sl_pips * pv
         if direction == "BUY":
-            sl = ep - sl_dist
-            tp = ep + atr * ATR_TP_MULT
+            sl = ep_adj - sl_dist
+            tp = ep_adj + atr * ATR_TP_MULT
         else:
-            sl = ep + sl_dist
-            tp = ep - atr * ATR_TP_MULT
+            sl = ep_adj + sl_dist
+            tp = ep_adj - atr * ATR_TP_MULT
         risk_pips   = sl_pips
-        reward_pips = abs(tp - ep) / pv
+        reward_pips = abs(tp - ep_adj) / pv
         rr          = reward_pips / risk_pips if risk_pips > 0 else 0
         if rr < HA_MIN_RR:
             return Signal(
@@ -543,13 +544,13 @@ def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD=X")
         sl_pips = max(HA_SL_MIN_PIPS, min(HA_SL_MAX_PIPS, atr * ATR_SL_MULT / pv))
         sl_dist = sl_pips * pv
         if direction == "BUY":
-            sl = ep - sl_dist
-            tp = ep + atr * ATR_TP_MULT
+            sl = ep_adj - sl_dist
+            tp = ep_adj + atr * ATR_TP_MULT
         else:
-            sl = ep + sl_dist
-            tp = ep - atr * ATR_TP_MULT
+            sl = ep_adj + sl_dist
+            tp = ep_adj - atr * ATR_TP_MULT
         risk_pips   = sl_pips
-        reward_pips = abs(tp - ep) / pv
+        reward_pips = abs(tp - ep_adj) / pv
         rr          = reward_pips / risk_pips if risk_pips > 0 else 0
 
     pattern_labels = {

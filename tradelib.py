@@ -159,7 +159,7 @@ def check_position_events(
 
     # Guard: initialise best_price for positions that pre-date this field
     if pos.best_price == 0.0:
-        pos.best_price = high if pos.direction == "BUY" else low
+        pos.best_price = pos.entry_price
 
     # ── Phase 1 — breakeven trigger ───────────────────────────────────────────
     if not pos.be_activated:
@@ -191,28 +191,17 @@ def check_position_events(
         (pos.direction == "SELL" and high >= pos.stop_loss)
     )
 
-    # ── Phase 3 — intercept first TP hit: extend if HA momentum agrees ───────
+    # ── Phase 3 — intercept first TP hit: extend unconditionally ────────────
     if hit_tp and not pos.tp_extended:
-        try:
-            ha_c = float(bar.get("ha_close", float("nan")))
-            ha_o = float(bar.get("ha_open",  float("nan")))
-            momentum_ok = not (pd.isna(ha_c) or pd.isna(ha_o)) and (
-                (pos.direction == "BUY"  and ha_c > ha_o) or
-                (pos.direction == "SELL" and ha_c < ha_o)
-            )
-        except (TypeError, ValueError):
-            momentum_ok = False
-
-        if momentum_ok:
-            ref_tp  = pos.original_tp if pos.original_tp else pos.take_profit
-            tp_dist = abs(ref_tp - pos.entry_price)
-            sign    = 1 if pos.direction == "BUY" else -1
-            pos.stop_loss   = pos.entry_price + sign * 0.9 * tp_dist
-            pos.take_profit = pos.entry_price + sign * 2.0 * tp_dist
-            pos.be_activated = True
-            pos.tp_extended  = True
-            events.append(("extend_tp", pos.take_profit))
-            return events   # hold — no close event this bar
+        ref_tp  = pos.original_tp if pos.original_tp else pos.take_profit
+        tp_dist = abs(ref_tp - pos.entry_price)
+        sign    = 1 if pos.direction == "BUY" else -1
+        pos.stop_loss   = pos.entry_price + sign * 0.9 * tp_dist
+        pos.take_profit = pos.entry_price + sign * 2.0 * tp_dist
+        pos.be_activated = True
+        pos.tp_extended  = True
+        events.append(("extend_tp", pos.take_profit))
+        return events   # hold — no close event this bar
 
     if hit_tp:
         events.append(("close_tp", pos.take_profit))

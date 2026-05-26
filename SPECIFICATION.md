@@ -1,7 +1,7 @@
 # FX Trader — System Specification v2
 
 **Date:** 2026-05-22  
-**Status:** Draft — for review before implementation
+**Status:** Implemented 2026-05-22; updated 2026-05-25
 
 ---
 
@@ -116,8 +116,8 @@ Once price reaches `TRAIL_ACTIVATE_FRAC` (default 0.80; EURUSD 0.70) of the init
 **Phase 2 — Active Trail**  
 After Phase 1 fires, SL ratchets `ATR × ATR_SL_MULT` behind the running best price. Winners run until the trail is hit.
 
-**Phase 3 — TP Extension (momentum gate)**  
-When the original TP is first hit and the current 5m HA candle colour agrees with trade direction, the trade is extended rather than closed:
+**Phase 3 — TP Extension**  
+When the original TP is first hit, the trade is extended unconditionally:
 - SL locks at 90% of the original TP distance from entry.
 - TP doubles to 2× the original TP distance.
 - Trail tightens to `ATR × ATR_SL_MULT × 0.5`.
@@ -145,6 +145,8 @@ Entry is rejected when the live Oanda spread exceeds 2× the standard spread for
 | GBPUSD | 1.5                    |
 | USDJPY | 2.0                    |
 | AUDUSD | 1.5                    |
+
+If the OANDA price check fails (network error), the guard **fails closed** — the entry is blocked and the rejection is logged.
 
 ### 3.9 Weekend Handling
 
@@ -614,6 +616,7 @@ FX_PAIRS             eurusd,usdjpy,audusd,gbpusd
 FX_CTRL_PORT         9876
 DATALIB_DIR          data/oanda # override default parquet storage path
 LOG_LEVEL            INFO
+DRAWDOWN_HALT_PCT    3.0        # halt entries when session loss % exceeds this value
 ```
 
 `FX_DATA_SOURCE` is removed. Data source is always OANDA. `yfinance` is not installed.
@@ -649,15 +652,50 @@ LOG_LEVEL            INFO
 
 ## 11. Open Issues (pre-implementation)
 
-| # | Issue                                                                      | Priority |
-|---|----------------------------------------------------------------------------|----------|
-| 1 | AUDUSD ADX gate compliance — gate deployed May 11 but live trades continued through May 19; investigate and fix before going live again | High |
-| 2 | Validate first backtest run against STRATEGY_LOGBOOK.md snapshots — OANDA data may produce different absolute numbers; establish new baselines | High |
-| 3 | `oanda.py` — add `get_candles_paginated()` (needed by `datalib.py`) | High |
-| 4 | Unified trade log migration — write a migration script to replay `trade_manager.jsonl` + `fx_trades.jsonl` into a single file with `trade_type` field | Medium |
-| 5 | GBPUSD retirement decision — re-evaluate once EURJPY is backtested on OANDA data via `datalib` | Medium |
-| 6 | Bar-synchronised sleep must handle DST boundary correctly (Europe vs US clocks diverge Oct/Mar) | Low |
-| 7 | `datalib` initial seed rate-limiting — test whether OANDA throttles 76 paginated requests for the 4-pair M1 seed; add retry/backoff if needed | Low |
+| # | Issue | Status |
+|---|---|---|
+| 1 | AUDUSD ADX gate compliance — investigate live trades continuing after May 11 gate deployment | Resolved — v2 uses OANDA-only data; ADX divergence root cause was Yahoo synthetic data |
+| 2 | Validate first backtest run against STRATEGY_LOGBOOK.md snapshots | Resolved — new baselines established with OANDA data |
+| 3 | `oanda.py` — add `get_candles_paginated()` | Resolved |
+| 4 | Unified trade log migration | Resolved — single `fx_trades.jsonl` with `trade_type` field |
+| 5 | GBPUSD retirement decision — re-evaluate once EURJPY backtested | Open — EURJPY PF 1.38/1.57; deferred until position headroom available |
+| 6 | Bar-synchronised sleep DST boundary handling | Open — low priority |
+| 7 | `datalib` initial seed rate-limiting — OANDA throttle testing | Resolved — no throttling observed in practice |
+
+### 11.1 Post-Implementation Fixes
+
+| Date | Fix | Detail |
+|---|---|---|
+| 2026-05-25 | Spread guard failure mode | Was failing open (allowing entry); now fails closed (blocks entry) |
+| 2026-05-25 | Phase 3 momentum gate removed | HA colour check was near-universally true; extension is now unconditional |
+| 2026-05-25 | Drawdown circuit breaker | Session loss % tracked per day; entries halted at DRAWDOWN_HALT_PCT; daily reset at UTC midnight |
+| 2026-05-25 | Cooldown extended | 30 min → 60 min (15% win rate observed in 30–60 min window) |
+| 2026-05-25 | Backtest spread constants aligned | Scalp/long spreads now match daemon STANDARD_SPREADS |
+| 2026-05-25 | extend_tp log replay | extend_tp events now persisted with sl/tp fields; replayed correctly on restart |
+| 2026-05-25 | Signal suppression on order failure | last_signal_bar no longer set when _open_automated() raises an exception |
+| 2026-05-25 | Threading safety | _LOG_LOCK serialises JSONL writes; _STATE_LOCK guards ctrl/states/managed between control thread and main loop |
+
+---
+
+## 11.2 Open Issues — Quant Review 2026-05-25
+
+Findings from the quant software architect review that remain open, renumbered for tracking. See §11.1 for items fixed in the same session. Severity: **Critical** > **High** > **Medium**.
+
+| # | Orig | Severity | File(s) | Finding |
+|---|------|----------|---------|---------|
+| 1 | 12 | Critical | `daemon.py:98–103` | **Correlated 4-pair USD exposure** — BUY on EUR/GBP/AUD + SELL on USDJPY is four simultaneous USD-short positions. A USD spike hits all four at once. No correlation gate; no max-concurrent-position count enforced in code. |
+| 2 | 28 | Critical | `daemon.py:1543` | **Control socket on `0.0.0.0`, no authentication** — anyone reaching port 9876 (e.g. on a VPS) can issue `close`, `stoploss`, or `register` commands. Should bind to `127.0.0.1` and/or require a shared secret. |
+| 3 | 6  | High | `daemon.py` | **TP not adjusted to actual fill price** — on slippage, `entry_price` is updated to the fill but `take_profit` (and the order placed on OANDA) is not shifted. The reward distance shrinks or grows silently. |
+| 4 | 13/14 | High | `daemon.py` | **Ghost position after broker-fired SL or weekend close** — automated positions are never reconciled against OANDA's open-trades list. A broker SL during a network gap leaves the daemon managing a non-existent position until the next natural event. |
+| 5 | 21 | High | `datalib.py:303–306` | **Partial-bar heuristic drops valid low-volume bars** — last bar dropped if volume < 10 % of median. Asian-session and early-London bars legitimately fail this threshold, causing a 5–10 min lag in signal evaluation and a systematic gap in bar series. |
+| 6 | 19 | High | `backtest.py` | **Long-mode backtest applies 5m indicator parameters to 1h bars** — `M5_EMA_FAST`, `M5_EMA_SLOW`, `M5_RSI_PERIOD`, `M5_ATR_MIN` are passed to `compute_m5_indicators()` even when running on 1h bars. Long-mode results use mismatched parameters; treat long-mode PF figures as indicative only. |
+| 7 | 2  | High | `backtest.py` | **HA open cold-started on 35-bar evaluation slice** — `compute_m5_indicators` resets `ha_open[0]` to `(O+C)/2` at each slice. With a 35-bar window, the first ~14 bars of HA colour are corrupted. Pattern D uses bars i−4 through i — some fall in the warm-up zone. Live daemon (600-bar cache) is unaffected. |
+| 8 | 3  | High (deferred) | all indicators | **SL floor `HA_SL_MIN_PIPS` overrides ATR_SL_MULT for patterns A/C** — ATR × 0.4 averages 3–6 pips on EURUSD but is floored to 10, making the parameter effectively inert. R:R degrades silently in low-ATR sessions. Deliberately deferred — see `project_atrslt_floor_issue.md` for full analysis. Dollar risk is correct; only R:R is affected. |
+| 9 | 31 | Medium | all indicators | **Parameter optimisation on 60-day window — overfitting risk** — ~60–70 trades per free parameter is below the 100:1 reliability threshold. `GBPUSD ADX=25` is aggressively fitted to one regime; a volatility shift could block GBPUSD entries entirely. Revisit after 6+ months of live data. |
+| 10 | 10 | Medium | `backtest.py` | **Spread double-counted in backtest P&L** — spread is applied to entry price when computing SL/TP, then deducted again when recording the exit. Makes backtest slightly pessimistic (1× spread per trade). |
+| 11 | 20 | Medium | `backtest.py` | **Max drawdown reported in pips, not dollars** — understates true dollar risk when position size varies across pairs (USDJPY lot sizes differ significantly from EURUSD). |
+| 12 | 29 | Medium | `daemon.py` | **`month_pips` on restart accumulates all history** — log replay sums every closed trade regardless of month. Status emails report a cumulative figure, not the current calendar month. |
+| 13 | 35 | Medium | `daemon.py` (paper mode) | **Paper mode uses signal bar close as entry price** — in paper mode there is no OANDA fill; `entry_price` is set to the signal bar's close. The backtest uses next-bar open. Paper results are more optimistic than either backtest or live. |
 
 ---
 

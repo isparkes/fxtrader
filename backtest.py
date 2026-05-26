@@ -61,10 +61,10 @@ PAIR_INDICATORS = {
 
 # Per-pair spread in pips (deducted from every trade's P&L)
 PAIR_CONFIG: dict[str, dict] = {
-    "eurusd": {"spread_scalp": 1.5, "spread_long": 1.0},
-    "gbpusd": {"spread_scalp": 1.8, "spread_long": 1.2},
-    "usdjpy": {"spread_scalp": 1.5, "spread_long": 1.0},
-    "audusd": {"spread_scalp": 1.8, "spread_long": 1.2},
+    "eurusd": {"spread_scalp": 1.0, "spread_long": 0.8},
+    "gbpusd": {"spread_scalp": 1.5, "spread_long": 1.0},
+    "usdjpy": {"spread_scalp": 2.0, "spread_long": 1.5},
+    "audusd": {"spread_scalp": 1.5, "spread_long": 1.0},
     "eurjpy": {"spread_scalp": 2.0, "spread_long": 1.5},
 }
 
@@ -346,6 +346,26 @@ def run_backtest(
         if sl_tp is None:
             continue
         entry_p, sl, tp = sl_tp
+
+        # Advance entry to next bar's open: the live daemon places the order
+        # after the signal bar closes, so it fills at the following bar's open.
+        if i + 1 >= len(merged):
+            continue
+        next_open    = float(merged.iloc[i + 1]["open"])
+        sl_pips_dist = abs(entry_p - sl) / pv
+        tp_pips_dist = abs(tp - entry_p) / pv
+        if bias == "BUY":
+            entry_p = next_open
+            sl      = entry_p - sl_pips_dist * pv
+            tp      = entry_p + tp_pips_dist * pv
+            if next_open <= sl:
+                continue
+        else:
+            entry_p = next_open
+            sl      = entry_p + sl_pips_dist * pv
+            tp      = entry_p - tp_pips_dist * pv
+            if next_open >= sl:
+                continue
 
         risk_pips   = abs(entry_p - sl) / pv
         reward_pips = abs(tp - entry_p) / pv

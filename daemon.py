@@ -65,13 +65,14 @@ Usage
 
 import os
 import sys
+import json
 import math
 import signal
 import threading
 import socket as _socket
 import logging
 import argparse
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
@@ -111,8 +112,9 @@ STANDARD_SPREADS: dict[str, float] = {
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-OANDA_RISK_PCT     = float(os.getenv("OANDA_RISK_PCT", "1"))
-FX_OCCULT_STOPS    = os.getenv("FX_OCCULT_STOPS", "false").lower() == "true"
+OANDA_RISK_PCT      = float(os.getenv("OANDA_RISK_PCT", "1"))
+DRAWDOWN_HALT_PCT   = float(os.getenv("DRAWDOWN_HALT_PCT", "3.0"))
+FX_OCCULT_STOPS     = os.getenv("FX_OCCULT_STOPS", "false").lower() == "true"
 FX_PAIRS_ENV       = os.getenv("FX_PAIRS", "").strip()
 CONTROL_PORT       = int(os.getenv("FX_CTRL_PORT", "9876"))
 
@@ -127,7 +129,9 @@ H1_LOOKBACK = pd.Timedelta(hours=3)
 M5_LOOKBACK = pd.Timedelta(minutes=15)
 D1_LOOKBACK = pd.Timedelta(days=2)
 
-_TRADE_LOG = Path("fx_trades.jsonl")
+_TRADE_LOG  = Path("fx_trades.jsonl")
+_LOG_LOCK   = threading.Lock()   # serialises concurrent JSONL writes
+_STATE_LOCK = threading.Lock()   # guards ctrl/states/managed between control thread and main loop
 
 log = logging.getLogger("fxtrader.daemon")
 
@@ -150,6 +154,8 @@ class ControlState:
     def __init__(self):
         self.pause_entry:            bool            = False
         self.pause_exit:             bool            = False
+        self.drawdown_halt:          bool            = False
+        self.session_loss_pct:       float           = 0.0
         self.pending_be:             bool            = False
         self.pending_close_all:      bool            = False
         self.pending_materialise_sl: bool            = False
@@ -278,8 +284,8 @@ def _spread_ok(pair: str) -> tuple[bool, float]:
                   pair.upper(), spread_pips, threshold, "OK" if ok else "BLOCKED")
         return ok, spread_pips
     except Exception as exc:
-        log.warning("%s  spread check failed (%s) — allowing entry", pair.upper(), exc)
-        return True, 0.0
+        log.error("%s  spread check failed (%s) — blocking entry", pair.upper(), exc)
+        return False, 0.0
 
 
 # ── Position sizing ───────────────────────────────────────────────────────────
@@ -306,9 +312,9 @@ def _calc_units(pair: str, risk_pips: float) -> int:
 # ── Trade log ─────────────────────────────────────────────────────────────────
 
 def _log_append(record: dict) -> None:
-    with _TRADE_LOG.open("a") as fh:
-        import json
-        fh.write(json.dumps(record) + "\n")
+    with _LOG_LOCK:
+        with _TRADE_LOG.open("a") as fh:
+            fh.write(json.dumps(record) + "\n")
 
 
 def _log_open(pos: tradelib.Position) -> None:
@@ -339,6 +345,17 @@ def _log_be(pos: tradelib.Position) -> None:
         "trade_id": pos.trade_id,
         "pair":     pos.pair,
         "sl":       pos.stop_loss,
+    })
+
+
+def _log_extend(pos: tradelib.Position) -> None:
+    _log_append({
+        "event":    "extend_tp",
+        "ts":       datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "trade_id": pos.trade_id,
+        "pair":     pos.pair,
+        "sl":       pos.stop_loss,
+        "tp":       pos.take_profit,
     })
 
 
@@ -408,6 +425,15 @@ def _load_state() -> dict:
                 elif trade_id and str(trade_id) in discrete:
                     discrete[str(trade_id)]["sl"] = discrete[str(trade_id)]["entry"]
                     discrete[str(trade_id)]["be_activated"] = True
+            elif event == "extend_tp":
+                if pair and pair in automated:
+                    automated[pair]["sl"] = rec["sl"]
+                    automated[pair]["tp"] = rec["tp"]
+                    automated[pair]["tp_extended"] = True
+                elif trade_id and str(trade_id) in discrete:
+                    discrete[str(trade_id)]["sl"] = rec["sl"]
+                    discrete[str(trade_id)]["tp"] = rec["tp"]
+                    discrete[str(trade_id)]["tp_extended"] = True
 
     return {"automated": automated, "discretionary": discrete, "month_pips": month_pips}
 
@@ -431,6 +457,7 @@ def _pos_from_record(rec: dict, occult_stops: bool) -> tradelib.Position:
         "basis":       rec.get("basis", ""),
         "trade_id":    rec.get("trade_id"),
         "be_activated": rec.get("be_activated", False),
+        "tp_extended":  rec.get("tp_extended", False),
         "original_tp": rec.get("original_tp", rec.get("tp", 0.0)),
         "best_price":  rec.get("best_price", rec.get("entry", 0.0)),
         "occult_stops": occult_stops,
@@ -522,6 +549,21 @@ def _email_close(pos: tradelib.Position, event: str, exit_price: float) -> tuple
     if pos.trade_id:
         lines.insert(0, f"Trade ID      : {pos.trade_id}")
     return subj, "\n".join(lines)
+
+
+def _email_drawdown_halt(loss_pct: float) -> tuple[str, str]:
+    subj = f"[FX] CIRCUIT BREAKER — {loss_pct:.1f}% session drawdown — entries halted"
+    body = "\n".join([
+        f"Session drawdown has reached {loss_pct:.1f}% of estimated NAV.",
+        f"Threshold: {DRAWDOWN_HALT_PCT:.1f}%",
+        "",
+        "New automated entries are HALTED.",
+        "Open positions continue to be managed normally.",
+        "",
+        "To resume intra-day: send 'resume_drawdown' via the control socket.",
+        "The circuit breaker resets automatically at UTC midnight.",
+    ])
+    return subj, body
 
 
 def _email_startup(
@@ -650,7 +692,7 @@ def _process_events(
                 "%s  TP EXTENDED — SL=%.5f  TP=%.5f",
                 pair.upper(), pos.stop_loss, pos.take_profit,
             )
-            _log_be(pos)
+            _log_extend(pos)
             if live and pos.trade_id:
                 try:
                     if not pos.occult_stops or pos.sl_materialised:
@@ -756,16 +798,19 @@ def tick(
         log.warning("%s  data refresh failed: %s", pair.upper(), exc)
         return state
 
-    if state.cache_h1 is None or len(state.cache_h1) < 30:
+    if state.cache_h1 is None or len(state.cache_h1) < 31:
         return state
     if state.cache_5m is None or len(state.cache_5m) < 30:
         return state
 
-    ind   = PAIR_INDICATORS[pair]
-    df_h1 = ind.compute_h1_indicators(state.cache_h1.copy())
+    ind       = PAIR_INDICATORS[pair]
+    # Drop the last (still-forming) H1 bar so assess_h1_bias only sees closed bars,
+    # matching the backtest which uses searchsorted to exclude the in-progress bar.
+    h1_closed = state.cache_h1.iloc[:-1]
+    df_h1 = ind.compute_h1_indicators(h1_closed.copy())
     df_5m = ind.compute_m5_indicators(state.cache_5m.copy())
 
-    df_4h = state.cache_h1.resample("4h", label="left", closed="left").agg(
+    df_4h = h1_closed.resample("4h", label="left", closed="left").agg(
         {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
     ).dropna()
     df_4h = ind.compute_h1_indicators(df_4h)
@@ -793,6 +838,19 @@ def tick(
                     else (pos.entry_price - exit_price)
                 ) / pv
                 state.month_pips  += pnl
+                # Drawdown circuit breaker
+                if pnl < 0 and pos.risk_pips > 0:
+                    loss_pct = abs(pnl) / pos.risk_pips * OANDA_RISK_PCT
+                    ctrl.session_loss_pct += loss_pct
+                    if ctrl.session_loss_pct >= DRAWDOWN_HALT_PCT and not ctrl.drawdown_halt:
+                        ctrl.drawdown_halt = True
+                        log.error(
+                            "CIRCUIT BREAKER: %.1f%% session drawdown (threshold %.1f%%) — entries halted",
+                            ctrl.session_loss_pct, DRAWDOWN_HALT_PCT,
+                        )
+                        subj, body = _email_drawdown_halt(ctrl.session_loss_pct)
+                        if not dry_run:
+                            send_email(subj, body)
                 # Cooldown only on stop-loss hits
                 events_were_sl = pnl < 0
                 if events_were_sl:
@@ -808,7 +866,7 @@ def tick(
             )
 
     # ── Entry signal check ───────────────────────────────────────────────────
-    elif not ctrl.pause_entry:
+    elif not ctrl.pause_entry and not ctrl.drawdown_halt:
         if state.cooldown_until and now < state.cooldown_until:
             log.debug("%s  cooldown until %s", pair.upper(),
                       state.cooldown_until.strftime("%H:%M UTC"))
@@ -821,7 +879,7 @@ def tick(
             if bias_info["direction"] != "FLAT":
                 entry = ind.find_m5_entry(df_5m, bias_info["direction"])
                 if entry and entry["bar_time"] != state.last_signal_bar:
-                    signal = ind.build_signal(bias_info, entry, pair.upper())
+                    signal = ind.build_signal(bias_info, entry, pair.upper(), spread_pips=STANDARD_SPREADS[pair])
 
                     if signal.direction != "FLAT" and _tp_sane(signal):
                         spread_ok, _ = _spread_ok(pair)
@@ -829,10 +887,13 @@ def tick(
                             state = _open_automated(
                                 pair, signal, state, dry_run, live, occult_stops
                             )
+                            if state.position is not None:
+                                state.last_signal_bar = entry["bar_time"]
                         else:
                             log.info("%s  signal skipped — spread too wide", pair.upper())
-
-                    state.last_signal_bar = entry["bar_time"]
+                            state.last_signal_bar = entry["bar_time"]
+                    else:
+                        state.last_signal_bar = entry["bar_time"]
 
     # ── Discretionary position management ───────────────────────────────────
     for tid, pos in list(managed.items()):
@@ -905,8 +966,7 @@ def _open_automated(
                 reward_pips = round(abs(signal.take_profit - entry_price) / pv, 1)
                 rr_ratio    = round(reward_pips / risk_pips, 2) if risk_pips > 0 else 0.0
         except Exception as exc:
-            log.error("%s  OANDA order failed — discarding signal: %s", pair.upper(), exc)
-            state.last_signal_bar = signal.bar_time
+            log.error("%s  OANDA order failed — will retry next poll: %s", pair.upper(), exc)
             return state
 
     pos = tradelib.Position(
@@ -1273,7 +1333,8 @@ def _ctrl_status(
     now   = datetime.now(timezone.utc)
     lines = ["=== FX Trader (v2) ==="]
     lines.append(f"Entries: {'PAUSED' if ctrl.pause_entry else 'active'}  |  "
-                 f"Exits: {'PAUSED' if ctrl.pause_exit else 'active'}")
+                 f"Exits: {'PAUSED' if ctrl.pause_exit else 'active'}  |  "
+                 f"Drawdown: {ctrl.session_loss_pct:.1f}% {'[HALTED]' if ctrl.drawdown_halt else ''}")
     lines.append("")
     lines.append("-- Automated --")
     for pair in pairs:
@@ -1330,6 +1391,10 @@ def _handle_ctrl_cmd(
     if verb == "resume_entry":
         ctrl.pause_entry = False
         return "Entry resumed."
+    if verb == "resume_drawdown":
+        ctrl.drawdown_halt    = False
+        ctrl.session_loss_pct = 0.0
+        return "Drawdown circuit breaker cleared — entries re-enabled."
     if verb == "pause_exit":
         ctrl.pause_exit = True
         return "Exit paused."
@@ -1497,7 +1562,8 @@ def _start_control_server(
             if cmd.lower() in ("quit", "exit", "q"):
                 conn.sendall(b"Bye.\r\n")
                 break
-            resp = _handle_ctrl_cmd(cmd, ctrl, pairs, states, managed)
+            with _STATE_LOCK:
+                resp = _handle_ctrl_cmd(cmd, ctrl, pairs, states, managed)
             conn.sendall(resp.encode() + b"\r\n\r\n> ")
 
     def _server() -> None:
@@ -1630,7 +1696,8 @@ def daemon_loop(
         send_email(subj, body)
 
     last_summary_slot: Optional[tuple] = None
-    current_month: int = datetime.now(timezone.utc).month
+    current_month: int  = datetime.now(timezone.utc).month
+    current_date:  date = datetime.now(timezone.utc).date()
     weekend_close_done: Optional[int]  = None
 
     while True:
@@ -1651,99 +1718,100 @@ def daemon_loop(
         weekday = now.weekday()
 
         # ── Process pending control commands ──────────────────────────────────
-        if ctrl.pending_close_all:
-            ctrl.pending_close_all = False
-            _close_all(pairs, states, managed, live, dry_run)
+        with _STATE_LOCK:
+            if ctrl.pending_close_all:
+                ctrl.pending_close_all = False
+                _close_all(pairs, states, managed, live, dry_run)
 
-        if ctrl.pending_be:
-            ctrl.pending_be = False
-            _set_all_be(pairs, states, managed, live, dry_run)
+            if ctrl.pending_be:
+                ctrl.pending_be = False
+                _set_all_be(pairs, states, managed, live, dry_run)
 
-        if ctrl.pending_materialise_sl:
-            ctrl.pending_materialise_sl = False
-            _materialise_sl(pairs, states, managed, live)
+            if ctrl.pending_materialise_sl:
+                ctrl.pending_materialise_sl = False
+                _materialise_sl(pairs, states, managed, live)
 
-        if ctrl.pending_materialise_tp:
-            ctrl.pending_materialise_tp = False
-            _materialise_tp(pairs, states, managed, live)
+            if ctrl.pending_materialise_tp:
+                ctrl.pending_materialise_tp = False
+                _materialise_tp(pairs, states, managed, live)
 
-        if ctrl.pending_occult_sl:
-            ctrl.pending_occult_sl = False
-            _occult_sl(pairs, states, managed, live)
+            if ctrl.pending_occult_sl:
+                ctrl.pending_occult_sl = False
+                _occult_sl(pairs, states, managed, live)
 
-        if ctrl.pending_occult_tp:
-            ctrl.pending_occult_tp = False
-            _occult_tp(pairs, states, managed, live)
+            if ctrl.pending_occult_tp:
+                ctrl.pending_occult_tp = False
+                _occult_tp(pairs, states, managed, live)
 
-        while ctrl.pending_apply_defaults:
-            tid = ctrl.pending_apply_defaults.pop(0)
-            _apply_trade_defaults(tid, managed, live)
+            while ctrl.pending_apply_defaults:
+                tid = ctrl.pending_apply_defaults.pop(0)
+                _apply_trade_defaults(tid, managed, live)
 
-        while ctrl.pending_close_one:
-            tid = ctrl.pending_close_one.pop(0)
-            pos = managed.pop(tid, None)
-            if pos is None:
-                # Check automated positions
-                for pair in pairs:
-                    if states[pair].position and str(states[pair].position.trade_id) == str(tid):
-                        pos = states[pair].position
-                        states[pair].position = None
-                        break
-            if pos:
-                _close_single(pos, live, dry_run, "close_manual")
-            else:
-                log.warning("close: trade %s not found", tid)
-
-        while ctrl.pending_registers:
-            tid = ctrl.pending_registers.pop(0)
-            if tid in managed:
-                continue
-            pos, err = _register_trade(tid, occult_stops, live)
-            if err:
-                log.error("Register failed for %s: %s", tid, err)
-            else:
-                managed[tid] = pos
-                _log_open(pos)
-                log.info("Registered [disc] %s %s @ %.5f  SL=%.5f  TP=%.5f",
-                         pos.pair.upper(), pos.direction, pos.entry_price,
-                         pos.stop_loss, pos.take_profit)
-                subj, body = _email_open(pos)
-                if dry_run:
-                    log.info("[DRY-RUN] %s", subj)
+            while ctrl.pending_close_one:
+                tid = ctrl.pending_close_one.pop(0)
+                pos = managed.pop(tid, None)
+                if pos is None:
+                    # Check automated positions
+                    for pair in pairs:
+                        if states[pair].position and str(states[pair].position.trade_id) == str(tid):
+                            pos = states[pair].position
+                            states[pair].position = None
+                            break
+                if pos:
+                    _close_single(pos, live, dry_run, "close_manual")
                 else:
-                    send_email(subj, body)
+                    log.warning("close: trade %s not found", tid)
 
-        while ctrl.pending_sl_updates:
-            tid, new_sl = ctrl.pending_sl_updates.pop(0)
-            pos = managed.get(tid)
-            if pos:
-                old_sl, pos.stop_loss = pos.stop_loss, new_sl
-                log.info("%s  SL %.5f → %.5f  [trade %s]", pos.pair.upper(), old_sl, new_sl, tid)
-                if live and pos.trade_id and (not pos.occult_stops or pos.sl_materialised):
-                    try:
-                        oanda.modify_trade_sl(pos.trade_id, new_sl, pos.pair)
-                    except Exception as exc:
-                        log.warning("SL update failed: %s", exc)
+            while ctrl.pending_registers:
+                tid = ctrl.pending_registers.pop(0)
+                if tid in managed:
+                    continue
+                pos, err = _register_trade(tid, occult_stops, live)
+                if err:
+                    log.error("Register failed for %s: %s", tid, err)
+                else:
+                    managed[tid] = pos
+                    _log_open(pos)
+                    log.info("Registered [disc] %s %s @ %.5f  SL=%.5f  TP=%.5f",
+                             pos.pair.upper(), pos.direction, pos.entry_price,
+                             pos.stop_loss, pos.take_profit)
+                    subj, body = _email_open(pos)
+                    if dry_run:
+                        log.info("[DRY-RUN] %s", subj)
+                    else:
+                        send_email(subj, body)
 
-        while ctrl.pending_tp_updates:
-            tid, new_tp = ctrl.pending_tp_updates.pop(0)
-            pos = managed.get(tid)
-            if pos:
-                old_tp, pos.take_profit, pos.original_tp = pos.take_profit, new_tp, new_tp
-                log.info("%s  TP %.5f → %.5f  [trade %s]", pos.pair.upper(), old_tp, new_tp, tid)
-                if live and pos.trade_id and (not pos.occult_stops or pos.tp_materialised):
-                    try:
-                        oanda.modify_trade_tp(pos.trade_id, new_tp, pos.pair)
-                    except Exception as exc:
-                        log.warning("TP update failed: %s", exc)
+            while ctrl.pending_sl_updates:
+                tid, new_sl = ctrl.pending_sl_updates.pop(0)
+                pos = managed.get(tid)
+                if pos:
+                    old_sl, pos.stop_loss = pos.stop_loss, new_sl
+                    log.info("%s  SL %.5f → %.5f  [trade %s]", pos.pair.upper(), old_sl, new_sl, tid)
+                    if live and pos.trade_id and (not pos.occult_stops or pos.sl_materialised):
+                        try:
+                            oanda.modify_trade_sl(pos.trade_id, new_sl, pos.pair)
+                        except Exception as exc:
+                            log.warning("SL update failed: %s", exc)
 
-        while ctrl.pending_deregisters:
-            tid = ctrl.pending_deregisters.pop(0)
-            pos = managed.pop(tid, None)
-            if pos:
-                _log_append({"event": "deregister", "ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                             "trade_id": tid, "pair": pos.pair})
-                log.info("%s  deregistered trade %s — no longer managed", pos.pair.upper(), tid)
+            while ctrl.pending_tp_updates:
+                tid, new_tp = ctrl.pending_tp_updates.pop(0)
+                pos = managed.get(tid)
+                if pos:
+                    old_tp, pos.take_profit, pos.original_tp = pos.take_profit, new_tp, new_tp
+                    log.info("%s  TP %.5f → %.5f  [trade %s]", pos.pair.upper(), old_tp, new_tp, tid)
+                    if live and pos.trade_id and (not pos.occult_stops or pos.tp_materialised):
+                        try:
+                            oanda.modify_trade_tp(pos.trade_id, new_tp, pos.pair)
+                        except Exception as exc:
+                            log.warning("TP update failed: %s", exc)
+
+            while ctrl.pending_deregisters:
+                tid = ctrl.pending_deregisters.pop(0)
+                pos = managed.pop(tid, None)
+                if pos:
+                    _log_append({"event": "deregister", "ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                 "trade_id": tid, "pair": pos.pair})
+                    log.info("%s  deregistered trade %s — no longer managed", pos.pair.upper(), tid)
 
         # ── Weekend handling ──────────────────────────────────────────────────
         if weekday in (5, 6):
@@ -1784,6 +1852,14 @@ def daemon_loop(
                                     occult_stops, managed, ctrl)
             except Exception as exc:
                 log.exception("%s  tick error: %s", pair.upper(), exc)
+
+        # ── Daily session reset ───────────────────────────────────────────────
+        today_utc = now.date()
+        if today_utc != current_date:
+            current_date = today_utc
+            ctrl.session_loss_pct = 0.0
+            ctrl.drawdown_halt    = False
+            log.info("New trading day — session drawdown reset")
 
         # ── Monthly pip reset ─────────────────────────────────────────────────
         if now.month != current_month:

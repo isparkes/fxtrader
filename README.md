@@ -1,6 +1,6 @@
 # FX Scalper
 
-A two-timeframe scalping system for major FX pairs and BTCUSD. The higher
+A two-timeframe scalping system for four major FX pairs (EURUSD, GBPUSD, USDJPY, AUDUSD). The higher
 timeframe sets the directional bias; the lower timeframe finds the precise
 entry trigger. Signals can be generated live, or the strategy can be replayed
 against historical data via the walk-forward backtest.
@@ -13,24 +13,20 @@ against historical data via the walk-forward backtest.
 | `indicator_gbpusd.py` | Signal logic and parameters for GBPUSD |
 | `indicator_usdjpy.py` | Signal logic and parameters for USDJPY |
 | `indicator_audusd.py` | Signal logic and parameters for AUDUSD |
-| `indicator_btcusd.py` | Signal logic and parameters for BTCUSD (pip = $1) |
-| `oanda.py` | Oanda REST API v20 wrapper — account summary, live pricing, order execution, and candle data |
-| `daemon_fx.py` | Long-running daemon for FX pairs — polls, manages positions, sends email alerts |
-| `daemon_crypto.py` | Long-running daemon for BTCUSD — as above, plus Binance order execution |
-| `fxctl.py` | One-shot control client for `daemon_fx.py` — scripting alternative to telnet |
-| `mailer.py` | SMTP email helper used by both daemons |
+| `oanda.py` | OANDA REST API v20 wrapper — account summary, live pricing, order execution, and paginated candle data |
+| `daemon.py` | Unified long-running daemon — automated signals + discretionary trade management + email alerts |
+| `tradelib.py` | Single source of truth: Position dataclass, three-phase trailing stop, position sizing |
+| `datalib.py` | Persistent OANDA parquet store (M1/H1/D per pair) |
+| `mailer.py` | SMTP email helper |
 | `tradelog.py` | Append-only trade journal — persists positions across daemon restarts |
-| `backtest.py` | Walk-forward backtest — replays the strategy against historical OHLCV data |
-| `forward_test_fx.py` | Forward-test summary — reads `fx_trades.jsonl` and prints per-week and overall performance tables matching the backtest column layout |
-| `trade_review.py` | Live trade analyser — reads both trade logs and produces full performance breakdowns by pair, period (day / week / month), regime, and pattern |
-| `compare.py` | Backtest vs live comparison — side-by-side table showing each pair's baseline metrics against live results with deltas |
-| `fx_trades.jsonl` | FX daemon trade log — one JSON line per OPEN / BE / CLOSE event |
-| `crypto_trades.jsonl` | Crypto daemon trade log |
+| `backtest.py` | Walk-forward backtest — replays the strategy against OANDA parquet data |
+| `fxctl.py` | One-shot control client for `daemon.py` — scripting alternative to telnet |
+| `fx_trades.jsonl` | Trade log — one JSON line per OPEN / BE / EXTEND_TP / CLOSE event |
 | `{pair}_backtest_trades.csv` | Trade-by-trade backtest output (one file per pair) |
 
 ## Active pairs
 
-### FX (daemon_fx.py)
+### FX (daemon.py)
 
 | Indicator file | Pair | Yahoo symbol | Oanda instrument | Status |
 |---|---|---|---|---|
@@ -38,12 +34,6 @@ against historical data via the walk-forward backtest.
 | `indicator_usdjpy.py` | US Dollar / Japanese Yen | `USDJPY=X` | `USD_JPY` | Active |
 | `indicator_audusd.py` | Australian Dollar / US Dollar | `AUDUSD=X` | `AUD_USD` | Active |
 | `indicator_gbpusd.py` | Cable — British Pound / US Dollar | `GBPUSD=X` | `GBP_USD` | **Not traded** — highest drawdown relative to gain; prime candidate to drop under 3-position limit |
-
-### Crypto (daemon_crypto.py)
-
-| Indicator file | Pair | Yahoo symbol |
-|---|---|---|
-| `indicator_btcusd.py` | Bitcoin / US Dollar | `BTC-USD` |
 
 ## Quick start
 
@@ -53,7 +43,6 @@ pip install -r requirements.txt
 
 # Live signal for a specific pair
 python indicator_eurusd.py
-python indicator_btcusd.py
 
 # Backtest a single pair — scalp mode, ~60 days of 5m bars
 python backtest.py --pair gbpusd
@@ -61,23 +50,8 @@ python backtest.py --pair gbpusd
 # Backtest a single pair — long mode, ~730 days of 1h bars
 python backtest.py --pair gbpusd --long
 
-# Backtest BTCUSD
-python backtest.py --pair btcusd
-
 # Backtest all pairs and show combined summary table
 python backtest.py --all
-
-# Forward-test summary — per-week tables + overall total from the live FX trade log
-python forward_test_fx.py
-
-# Forward-test for a specific month only
-python forward_test_fx.py --month 2026-05
-
-# Full live trade analysis — all periods, regime, and pattern breakdowns
-python trade_review.py
-
-# Side-by-side backtest vs live comparison
-python compare.py
 ```
 
 ---
@@ -184,9 +158,10 @@ telnet localhost 9876
 ```
 
 Commands: `status`, `pause`, `resume`, `pause_entry`, `resume_entry`,
-`pause_exit`, `resume_exit`, `materialise_sl`, `materialise_tp`,
-`be` (move all SLs to breakeven), `close` (close all positions at market),
-`help`, `quit`.
+`pause_exit`, `resume_exit`, `register <id>`, `stoploss <id> <sl>`,
+`takeprofit <id> <tp>`, `deregister <id>`, `close [<id>]`, `be`,
+`materialise_sl`, `materialise_tp`, `apply_defaults <id>`, `occult_sl`,
+`occult_tp`, `trades`, `resume_drawdown`, `help`, `quit`.
 
 `docker-compose.yml` maps port 9876 to `127.0.0.1:9876` on the host
 (localhost-only — not exposed to the network). To change the port, set
@@ -214,7 +189,7 @@ docker run -d \
 
 ### Daemon flags
 
-**daemon_fx.py**
+**daemon.py**
 
 | Flag | Default | Description |
 |---|---|---|
@@ -224,13 +199,7 @@ docker run -d \
 | `--dry-run` | off | Log events but do not send emails or place orders |
 | `--occult-stops` | off | Omit SL/TP from Oanda orders; daemon closes the trade explicitly when levels are hit (stop-hunt defence) |
 | `FX_CTRL_PORT` | `9876` | TCP port for the telnet control console (env var only) |
-
-**daemon_crypto.py**
-
-| Flag | Default | Description |
-|---|---|---|
-| `--interval <seconds>` | `300` | Poll interval in seconds |
-| `--dry-run` | off | Log events; skip emails and Binance order placement |
+| `DRAWDOWN_HALT_PCT` | `3.0` | Halt new entries when session losses exceed this % of NAV; cleared with `resume_drawdown` via control console |
 
 ### Viewing logs
 
@@ -357,8 +326,10 @@ testing showed sub-1.0 PF for each on that pair.
 | Stop loss (D) | Pullback extreme ± buffer, clamped | `HA_SL_MIN_PIPS` to `HA_SL_MAX_PIPS` from entry |
 | Trailing stop — phase 1 | Move to entry (breakeven) | EURUSD: triggered at 70% of TP; others: 80% |
 | Trailing stop — phase 2 | Trail ATR × 0.4 behind best price | Runs from breakeven; exits when momentum exhausts |
-| Cooldown after loss | 6 bars (30 min in scalp mode) | Prevents revenge trading |
+| Trailing stop — phase 3 | TP doubles unconditionally to 2× the original TP distance; SL locks at 90% of the original TP distance; trail tightens to ATR × SL_MULT × 0.5 | Triggered when price reaches the original TP; extends winning trades |
+| Cooldown after loss | 12 bars (60 min in scalp mode) | Prevents revenge trading |
 | Spread guard | Block entry if live spread > 2× standard | Queried from Oanda at signal time; guards against news spikes and thin liquidity |
+| Drawdown circuit breaker | Halt new entries when session loss reaches DRAWDOWN_HALT_PCT (default 3%) | Resets daily at UTC midnight; cleared manually with `resume_drawdown` |
 | Trading day gate | Monday–Thursday only | Friday is suppressed via `BLOCKED_DAYS = {4}` — PF across all pairs is materially lower on Fridays (chop/low liquidity). Saturday and Sunday are blocked by the daemon's weekend skip. |
 | Weekend auto-close | Friday ≥ 20:00 UTC | All open positions closed at mid-price before weekend spread blowout; a close email is sent per position. Ticks are skipped entirely on Saturday and Sunday. |
 
@@ -371,7 +342,7 @@ Standard spreads used by the guard (pip thresholds at 2× these values trigger r
 | USDJPY | 2.0 pips | > 4.0 pips |
 | AUDUSD | 1.5 pips | > 3.0 pips |
 
-If the Oanda price check fails (network error), the guard fails open and the entry is allowed. The rejection is logged at INFO level as `<PAIR> <DIRECTION> signal skipped — spread X.X pips exceeds Y.Y pip threshold`.
+If the Oanda price check fails (network error), the guard fails **closed** — the entry is blocked. The rejection is logged at INFO level as `<PAIR> <DIRECTION> signal skipped — spread X.X pips exceeds Y.Y pip threshold`.
 
 ### Indicator parameters
 
@@ -453,11 +424,10 @@ prevents look-ahead bias.
 
 | Pair | Scalp | Long | Unit |
 |---|---|---|---|
-| EURUSD | 1.5 pips | 1.0 pip | pips |
-| GBPUSD | 1.8 pips | 1.2 pips | pips |
-| USDJPY | 1.5 pips | 1.0 pip | pips |
-| AUDUSD | 1.8 pips | 1.2 pips | pips |
-| BTCUSD | $20 | $15 | USD |
+| EURUSD | 1.0 pip | 0.8 pip | pips |
+| GBPUSD | 1.5 pips | 1.0 pip | pips |
+| USDJPY | 2.0 pips | 1.5 pips | pips |
+| AUDUSD | 1.5 pips | 1.0 pip | pips |
 
 ---
 
@@ -618,7 +588,6 @@ USDJPY uses Patterns D+E only; EURUSD/GBPUSD/AUDUSD use Patterns A+C+D.
 | USDJPY | 45 | 31.1% | 60.4 | 9.5 | **2.86** | +12.2 | +550 | -65 | pips |
 | AUDUSD | 52 | 50.0% | 29.1 | 11.8 | **2.45** | +8.6 | +448 | -47 | pips |
 | GBPUSD | 39 | 33.3% | 51.5 | 11.9 | **2.16** | +9.2 | +359 | -60 | pips |
-| BTCUSD | 131 | 27.5% | 950 | 207 | **1.74** | +111 | +14,569 | -3,728 | USD |
 
 ### Long mode — 730 days · 1h bars (as of 2026-05-09)
 
@@ -630,11 +599,8 @@ Daily ADX gate not applied in long mode. USDJPY uses Patterns D+E only.
 | EURUSD | 326 | 24.2% | 53.1 | 11.6 | **1.46** | +4.1 | +1,326 | -194 | pips |
 | GBPUSD | 353 | 19.5% | 76.1 | 12.4 | **1.49** | +4.9 | +1,729 | -444 | pips |
 | AUDUSD | 341 | 23.8% | 51.4 | 11.5 | **1.39** | +3.4 | +1,162 | -179 | pips |
-| BTCUSD | 326 | 24.5% | 2,619 | 406 | **2.10** | +337 | +109,698 | -5,244 | USD |
 
-All five instruments are profitable in both modes. EURUSD leads the active FX
-pairs in scalp mode (PF 3.01, 53.7% WR). USDJPY leads in long mode (PF 2.07).
-BTCUSD has the strongest scalp PF among all instruments after EURUSD.
+All four pairs are profitable in both modes. EURUSD leads in scalp mode (PF 3.01, 53.7% WR). USDJPY leads in long mode (PF 2.07).
 
 **GBPUSD is currently not traded.** The 30:1 leverage limit caps concurrent
 positions at 3, and GBPUSD carries the largest long-mode drawdown relative to

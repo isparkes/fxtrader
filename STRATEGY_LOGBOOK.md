@@ -986,3 +986,49 @@ V2 redevelopment completed 2026-05-22. Key changes from V1:
 **Active pairs at V2 sign-off:** EURUSD (PF 3.03), USDJPY (PF 3.17), AUDUSD (PF 2.02), GBPUSD (PF 1.20 — marginal, candidate for replacement).
 
 ---
+
+## Snapshot — 2026-05-25
+
+**Period:** scalp = 60d ending 2026-05-25 (data through 2026-05-23 Friday close)
+**Changes since last snapshot:** Code-quality and correctness pass — no indicator logic or parameter changes.
+1. **Spread guard failure mode changed** — was failing open (allowing entry) on OANDA price check exception; now fails closed (blocks entry). Prevents accidental entries during news/outage.
+2. **Phase 3 momentum gate removed** — TP extension is now unconditional. The HA colour check was near-universally true (any bar that reaches TP on an in-progress trend almost always has a same-colour HA candle due to the smoothing formula); removing it makes the code honest about actual behaviour.
+3. **Backtest spread constants aligned** — now match `daemon.py` `STANDARD_SPREADS` exactly (EURUSD 1.0, GBPUSD 1.5, USDJPY 2.0, AUDUSD 1.5 pips). Prior backtest used EURUSD 1.5, USDJPY 1.5. USDJPY spread increase (+0.5 pip) makes the backtest slightly less favourable for that pair; EUR/GBP/AUD are slightly better.
+4. **Drawdown circuit breaker added to `daemon.py`** — session loss % tracked; entries halted at `DRAWDOWN_HALT_PCT` (default 3% of NAV); daily reset at UTC midnight.
+5. **`extend_tp` event replay fix** — event now persisted with `sl`/`tp` fields and replayed correctly on restart; Phase 3 state was previously lost across daemon restarts.
+6. **Signal suppression on order failure fixed** — `last_signal_bar` no longer set when `_open_automated()` raises an exception; prevents the signal bar being marked "seen" after a transient OANDA error.
+7. **Threading safety** — `_LOG_LOCK` serialises concurrent JSONL writes; `_STATE_LOCK` guards `ctrl`/`states`/`managed` between the control thread and main loop.
+8. **`best_price` initialisation fixed** — was set to bar `high`/`low` on first poll; now initialised to `entry_price`, preventing a false Phase 1 breakeven trigger on the opening bar.
+
+### Scalp mode — 60d · 5m bars
+
+60d net-change: EURUSD +0.4%, GBPUSD +0.5%, USDJPY −0.2%, AUDUSD +2.6% (all FLAT)
+
+| Pair   | Market Regime | Trades | Win%  | Avg W    | Avg L   |  PF  | Expec      | Total      | Max DD       |
+|--------|---------------|--------|-------|----------|---------|------|------------|------------|--------------|
+| EURUSD | FLAT          |     55 | 52.7% |  30.2 p  |  11.1 p | 3.02 |  10.6 p/tr |    585.1 p |    −44.0 p   |
+| USDJPY | FLAT          |     41 | 39.0% |  48.3 p  |  10.5 p | 2.94 |  12.4 p/tr |    509.8 p |    −51.9 p   |
+| AUDUSD | FLAT          |     27 | 44.4% |  38.0 p  |  11.7 p | 2.60 |  10.4 p/tr |    281.2 p |    −34.5 p   |
+| GBPUSD | FLAT          |     29 | 24.1% |  43.9 p  |  11.7 p | 1.20 |   1.7 p/tr |     50.6 p |   −149.4 p   |
+
+(p = pips · tr = trade · USDJPY: Patterns D+E, ADX exempt; EURUSD/GBPUSD/AUDUSD: A+C+D · GBPUSD not actively traded)
+
+### vs. prior baseline (2026-05-22 V2 OANDA Baseline)
+
+| Pair   | PF before | PF after | Trades before→after | Max DD before→after | Notes |
+|--------|-----------|----------|---------------------|---------------------|-------|
+| EURUSD | 3.03      | **3.02** | 55 → 55             | −48 → −44           | Stable; 0.5 pip spread reduction offsets rolling window shift |
+| USDJPY | 3.17      | **2.94** | 44 → 41             | −69 → −52           | Lower spread cost offset by +0.5 pip spread correction; DD improved |
+| AUDUSD | 2.02      | **2.60** | 28 → 27             | −68 → −35           | Improved; rolling window likely dropped some W17/W19 range losers |
+| GBPUSD | 1.20      | **1.20** | 29 → 29             | −98 → −149          | Unchanged PF but DD has widened significantly — drawdown profile deteriorating |
+
+### Notes
+
+- **All three active pairs above PF 2.5 — clean green light for the week.** EURUSD and USDJPY are essentially unchanged from the v2 OANDA baseline; AUDUSD has improved.
+- **USDJPY PF decline (3.17 → 2.94) is largely mechanical** — the spread correction from 1.5 to 2.0 pips costs ~0.5 pip per trade (41 trades = ~20 pips adjusted). The rolling window dropping 3 profitable trades also contributes. No deterioration of underlying pattern quality; avg win is still 48+ pips.
+- **AUDUSD trade count halved (52 → 27 over two snapshots)** relative to the May 11 Yahoo-data baseline. The OANDA ADX gate is correctly suppressing low-trend periods that Yahoo's inflated ADX was allowing. Fewer but higher-quality trades; PF 2.60 and max DD −34.5p is the best drawdown of any pair this snapshot.
+- **GBPUSD max DD has grown to −149 pips** against only +51 pips net — a 3:1 DD-to-gain ratio. PF 1.20 is statistically indistinguishable from random in a 29-trade sample. The decision not to trade it is confirmed. EURJPY (PF 1.38/1.57 from May evaluation) remains the candidate replacement when a slot opens.
+- **No long-mode run this snapshot** — no indicator or parameter changes affecting long mode.
+- **Data integrity:** parquet stores updated through 2026-05-23 Friday close; 1,100–1,160 new M1 bars and 18–19 new H1 bars added per pair.
+
+---

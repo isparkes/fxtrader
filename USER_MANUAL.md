@@ -175,9 +175,10 @@ Daily ADX(14) must exceed a per-pair threshold before entries are allowed:
 - **Trailing stop (three-phase):**
   1. *Breakeven:* stop moves to entry once price reaches a fraction of the TP distance (70% for EURUSD; 80% for all others)
   2. *ATR trail:* stop tracks price at ATR × SL_MULT distance
-  3. *TP extension:* if Heikin-Ashi momentum agrees, TP doubles (2× original), stop locks to 90% of TP, trail tightens to 50%
+  3. *TP extension:* when the original TP is first reached, the trade extends unconditionally — TP doubles to 2× the original TP distance, SL locks at 90% of the original TP distance from entry, trail tightens to ATR × SL_MULT × 0.5
 - **Cooldown:** no new entry for **60 minutes** after a loss
 - **Spread guard:** live spread is queried before every entry; if it exceeds 2× the pair's standard spread the signal is skipped and logged
+- **Drawdown circuit breaker:** new entries are halted when session losses reach `DRAWDOWN_HALT_PCT`% of NAV (default 3%). The daemon sends an email alert and sets status to `[HALTED]`. The halt resets automatically at UTC midnight and can be cleared manually with `resume_drawdown`.
 - **Trading day gate:** FX entries are blocked on Friday, Saturday, and Sunday
 - **Session filter:** entries only fire during **07:00–16:00 UTC** (London / New York overlap)
 - **Weekend auto-close:** at 20:00 UTC on Friday the daemon closes all open FX positions ahead of weekend spread blowout
@@ -318,6 +319,7 @@ Bye.
 | `resume_entry` | Re-enable new trade entries |
 | `pause_exit` | Suppress automatic position closes (SL/TP hits are logged but not acted on) |
 | `resume_exit` | Re-enable automatic position exits |
+| `resume_drawdown` | Clear the drawdown circuit breaker and re-enable new entries |
 | `register <id>` | Register an open OANDA trade ID for daemon trailing-stop management |
 | `stoploss <id> <sl>` | Override the stop-loss price for a discretionary trade |
 | `takeprofit <id> <tp>` | Override the take-profit price for a discretionary trade |
@@ -326,6 +328,9 @@ Bye.
 | `be` | Move every open stop-loss to breakeven immediately |
 | `materialise_sl` | Place real broker SL orders for every occult-stops position |
 | `materialise_tp` | Place real broker TP orders for every occult-stops position |
+| `apply_defaults <id>` | Compute ATR-based SL/TP for a managed trade and push the levels to the broker |
+| `occult_sl` | Remove broker SL orders from all managed positions (daemon takes over exit monitoring) |
+| `occult_tp` | Remove broker TP orders from all managed positions |
 | `trades` | List all open OANDA trades with SL/TP, flagged if daemon-managed |
 | `help` | List available commands |
 | `quit` | Disconnect |
@@ -367,6 +372,7 @@ To stop managing a trade without closing it, use `deregister <id>`.
 | **CLOSE** | Stop loss or take profit is hit |
 | **MANUAL CLOSE** | `close` command sent via control console |
 | **WEEKEND CLOSE** | Friday ≥ 20:00 UTC — daemon closes positions ahead of weekend spread blowout |
+| **DRAWDOWN HALT** | Session losses reach `DRAWDOWN_HALT_PCT`% — entries suspended until midnight reset or `resume_drawdown` |
 | **Daily Summary** | 08:00 UTC and 20:00 UTC — open positions, month-to-date pips, account balance, and open trade P&L |
 
 ### Trade log and restart persistence
@@ -420,6 +426,7 @@ OANDA_ENV=practice             # "practice" (demo) or "live"
 OANDA_RISK_PCT=1               # % of NAV to risk per trade (1 = 1%, 0.8 = 0.8%)
 FX_LIVE=false                  # true = place live OANDA market orders
 FX_OCCULT_STOPS=false          # true = enable occult stops
+DRAWDOWN_HALT_PCT=3.0          # halt entries when session loss exceeds this % of NAV
 ```
 
 ---
@@ -560,3 +567,8 @@ command: ["--pair", "eurusd", "usdjpy"]
 **Daemon does not restart after crash**
 - Check `fxtrader.log` for the error.
 - If a position was open when the crash occurred, use `register <id>` after restart to resume management.
+
+**Daemon shows `[HALTED]` in status**
+- Session losses have reached the drawdown limit (`DRAWDOWN_HALT_PCT`, default 3%). A halt email was sent.
+- The halt resets automatically at UTC midnight.
+- To clear it immediately: `resume_drawdown` via the control console.
