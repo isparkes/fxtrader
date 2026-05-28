@@ -189,7 +189,7 @@ def _fetch_oanda(
     start: Optional[datetime] = None,
 ) -> pd.DataFrame:
     """Fetch OHLCV bars from OANDA. Returns UTC-indexed DataFrame."""
-    oanda_gran = {"H1": "H1", "M5": "M5", "D": "D"}[granularity]
+    oanda_gran = {"H1": "H1", "M5": "M5", "M1": "M1", "D": "D"}[granularity]
     candles = oanda.get_candles(pair, granularity=oanda_gran, count=count, from_time=start)
     if not candles:
         return pd.DataFrame()
