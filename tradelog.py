@@ -6,15 +6,15 @@ On restart, ``load_state()`` replays the file and returns any open positions
 together with the month-to-date pip total so the daemon can resume seamlessly.
 
 Log format (one JSON object per line):
-  {"event": "open",  "ts": "...", "pair": "eurusd", "symbol": "EURUSD=X",
+  {"event": "open",  "ts": "...", "pair": "eurusd", "symbol": "EURUSD",
    "direction": "BUY", "entry": 1.08500, "sl": 1.08300, "tp": 1.08900,
    "atr": 0.00120, "risk_pips": 20.0, "reward_pips": 40.0, "rr": 2.0,
    "opened_at": "2024-01-01T10:00:00 UTC", "basis": "..."}
 
-  {"event": "be",    "ts": "...", "pair": "eurusd", "symbol": "EURUSD=X",
+  {"event": "be",    "ts": "...", "pair": "eurusd", "symbol": "EURUSD",
    "opened_at": "...", "sl": 1.08500}
 
-  {"event": "close", "ts": "...", "pair": "eurusd", "symbol": "EURUSD=X",
+  {"event": "close", "ts": "...", "pair": "eurusd", "symbol": "EURUSD",
    "opened_at": "...", "direction": "BUY", "entry": 1.08500, "exit": 1.08900,
    "pnl_pips": 40.0, "reason": "close_tp"}
 """
@@ -94,7 +94,7 @@ def load_state() -> dict[str, dict]:
     """
     Replay ``trades.jsonl`` and reconstruct daemon state.
 
-    Returns a dict keyed by *symbol* (e.g. ``"EURUSD=X"``) containing:
+    Returns a dict keyed by *symbol* (e.g. ``"EURUSD"``) containing:
 
         {
             "position": dict | None,   # Position constructor kwargs, or None

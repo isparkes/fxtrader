@@ -2,14 +2,13 @@
 FX Scalper — Walk-forward backtest
 ====================================
 Simulates the indicator strategy against OANDA historical data stored by
-datalib.py.  All market data comes from the local parquet store; Yahoo Finance
-is not used.
+datalib.py.  All market data comes from the local OANDA parquet store.
 
 Two modes:
 
   Default (scalp mode)
-    Trend : H1 bars
-    Entry : M5 bars derived from M1 (up to 90 days)
+    Trend : H1 bars resampled from M1 (up to 90 days) — same data path as daemon
+    Entry : M5 bars resampled from M1
     M1 within-bar simulation: SL/TP ordering resolved using 1-minute bars
 
   Long mode  (--long)
@@ -130,12 +129,12 @@ def fetch_data(
         datalib.update(pair)
 
     df_m1      = datalib.load(pair, "M1")
-    df_h1_raw  = datalib.load(pair, "H1")
+    df_h1_raw  = datalib.resample(df_m1, "H1")
     df_1d_raw  = datalib.load(pair, "D")
 
     df_h1 = ind.compute_h1_indicators(df_h1_raw.copy())
 
-    # 4H resampled from stored H1 bars (clean OHLCV from OANDA)
+    # 4H resampled from M1-derived H1, matching the daemon's data path
     df_4h = df_h1_raw.resample("4h", label="left", closed="left").agg(
         {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
     ).dropna()

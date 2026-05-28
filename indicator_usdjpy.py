@@ -518,7 +518,7 @@ def compute_sl_tp(
         tp      = entry_p - atr * ATR_TP_MULT
     return entry_p, sl, tp
 
-def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD=X", spread_pips: float = 0.0) -> Signal:
+def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD", spread_pips: float = 0.0) -> Signal:
     """
     Combine the 1h bias and the 5m entry trigger into a Signal dataclass.
 

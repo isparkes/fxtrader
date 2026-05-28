@@ -28,12 +28,12 @@ against historical data via the walk-forward backtest.
 
 ### FX (daemon.py)
 
-| Indicator file | Pair | Yahoo symbol | Oanda instrument | Status |
-|---|---|---|---|---|
-| `indicator_eurusd.py` | Euro / US Dollar | `EURUSD=X` | `EUR_USD` | Active |
-| `indicator_usdjpy.py` | US Dollar / Japanese Yen | `USDJPY=X` | `USD_JPY` | Active |
-| `indicator_audusd.py` | Australian Dollar / US Dollar | `AUDUSD=X` | `AUD_USD` | Active |
-| `indicator_gbpusd.py` | Cable — British Pound / US Dollar | `GBPUSD=X` | `GBP_USD` | **Not traded** — highest drawdown relative to gain; prime candidate to drop under 3-position limit |
+| Indicator file | Pair | Oanda instrument | Status |
+|---|---|---|---|
+| `indicator_eurusd.py` | Euro / US Dollar | `EUR_USD` | Active |
+| `indicator_usdjpy.py` | US Dollar / Japanese Yen | `USD_JPY` | Active |
+| `indicator_audusd.py` | Australian Dollar / US Dollar | `AUD_USD` | Active |
+| `indicator_gbpusd.py` | Cable — British Pound / US Dollar | `GBP_USD` | **Not traded** — highest drawdown relative to gain; prime candidate to drop under 3-position limit |
 
 ## Quick start
 
@@ -70,7 +70,6 @@ OANDA_API_KEY=...              # personal access token from Oanda
 OANDA_ACCOUNT_ID=...           # numeric account ID from the Oanda hub
 OANDA_ENV=practice             # "practice" (demo) or "live"
 OANDA_RISK_PCT=1               # % of balance to risk per trade (1 = 1%, 0.8 = 0.8%)
-FX_DATA_SOURCE=yfinance        # "yfinance" (default) or "oanda" for price/candle data
 FX_LIVE=false                  # true = place live Oanda market orders on every signal
 FX_OCCULT_STOPS=false          # true = SL/TP not sent to broker; daemon closes explicitly (stop-hunt defence)
 FX_CTRL_PORT=9876              # TCP port for the real-time control console (default 9876)
@@ -552,15 +551,9 @@ the next run — no other files need editing.
    ```bash
    cp indicator_eurusd.py indicator_eurjpy.py
    ```
-2. In `indicator_eurjpy.py` update the `PAIRS` dict and `SYMBOL`:
-   ```python
-   PAIRS  = {"eurjpy": "EURJPY=X"}
-   SYMBOL = "EURJPY=X"
-   ```
-3. Register the module in **both** `daemon_fx.py` and `backtest.py`:
+2. Register the module in **both** `daemon.py` and `backtest.py`:
    ```python
    import indicator_eurjpy
-   PAIRS["eurjpy"] = "EURJPY=X"
    PAIR_INDICATORS["eurjpy"] = indicator_eurjpy
    ```
 4. Add spread defaults to `PAIR_CONFIG` in `backtest.py`:

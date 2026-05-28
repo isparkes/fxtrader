@@ -6,14 +6,13 @@ trades from a single process.
 
 Data source
 -----------
-OANDA only.  Yahoo Finance / FX_DATA_SOURCE env var removed.
+OANDA only.
 An in-memory OHLCV cache per pair is kept topped up via incremental OANDA fetches.
 
 Poll timing
 -----------
-  Idle (no open positions): sleeps to the next 5-minute bar boundary + 5 s so
-    every completed bar is evaluated exactly once with minimal latency.
-  Positions open: polls every POSITION_POLL_SECS (15 s) for faster exit detection.
+  Polls every 60 s unconditionally so new M1 bars are evaluated promptly
+  regardless of whether any positions are open.
 
 Trade types
 -----------
@@ -121,14 +120,16 @@ CONTROL_PORT       = int(os.getenv("FX_CTRL_PORT", "9876"))
 
 COOLDOWN_MINS       = 60
 WEEKEND_CLOSE_HOUR  = 20
-POSITION_POLL_SECS  = 15    # fast-poll interval while any position is open
+POLL_INTERVAL_SECS  = 60    # fixed 1-minute poll — matches M1 bar cadence
 
 H1_MAX_BARS = 300
 M5_MAX_BARS = 600
 D1_MAX_BARS = 100
+M1_MAX_BARS = 360     # 6-hour rolling M1 window used to resample M5 and H1
 H1_LOOKBACK = pd.Timedelta(hours=3)
 M5_LOOKBACK = pd.Timedelta(minutes=15)
 D1_LOOKBACK = pd.Timedelta(days=2)
+M1_LOOKBACK = pd.Timedelta(hours=2)
 
 _TRADE_LOG  = Path("fx_trades.jsonl")
 _LOG_LOCK   = threading.Lock()   # serialises concurrent JSONL writes
@@ -144,6 +145,7 @@ class PairState:
     cache_h1:        Optional[pd.DataFrame]          = None
     cache_5m:        Optional[pd.DataFrame]          = None
     cache_1d:        Optional[pd.DataFrame]          = None
+    cache_m1:        Optional[pd.DataFrame]          = None
     position:        Optional[tradelib.Position]     = None   # automated position
     cooldown_until:  Optional[datetime]              = None
     last_signal_bar: Optional[str]                   = None
@@ -204,18 +206,35 @@ def _merge_cache(cached: pd.DataFrame, new: pd.DataFrame, max_bars: int) -> pd.D
     return combined.tail(max_bars)
 
 
+def _resample_m1(df: pd.DataFrame, target: str) -> pd.DataFrame:
+    """Resample M1 bars to M5 or H1, preserving the forming (partial) last bar."""
+    freq = {"M5": "5min", "H1": "1h"}[target]
+    return (
+        df.resample(freq, label="left", closed="left")
+        .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+        .dropna(subset=["open"])
+    )
+
+
 def refresh_data(pair: str, state: PairState) -> PairState:
-    """Update in-memory OHLCV caches for one pair from OANDA."""
+    """Update in-memory OHLCV caches for one pair.
+
+    Primary path: fetch M1 from OANDA and resample to M5 and H1 so that the
+    forming (in-progress) H1 bar is always included.
+    Fallback: native H1 and M5 from OANDA when M1 is unavailable.
+    """
     if state.cache_h1 is None:
-        # Warm-start from the local parquet store when available (avoids the
-        # heavy multi-request initial OANDA fetch on every daemon restart).
+        # ── Warm-start ────────────────────────────────────────────────────────
         try:
-            df_h1 = datalib.load(pair, "H1").tail(H1_MAX_BARS)
-            df_m1 = datalib.load(pair, "M1")
-            df_5m = datalib.resample(df_m1, "M5").tail(M5_MAX_BARS)
-            df_1d = datalib.load(pair, "D").tail(D1_MAX_BARS)
-            if df_h1.empty or df_5m.empty:
-                raise ValueError("empty parquet data")
+            df_m1_full = datalib.load(pair, "M1")
+            df_1d      = datalib.load(pair, "D").tail(D1_MAX_BARS)
+            if df_m1_full.empty:
+                raise ValueError("empty M1 parquet")
+            # H1 via resample keeps the forming bar; M5 via datalib drops it
+            # (historical M5 bars from parquet are all complete).
+            df_h1 = _resample_m1(df_m1_full, "H1").tail(H1_MAX_BARS)
+            df_5m = datalib.resample(df_m1_full, "M5").tail(M5_MAX_BARS)
+            state.cache_m1 = df_m1_full.tail(M1_MAX_BARS)
             state.cache_h1 = df_h1
             state.cache_5m = df_5m
             state.cache_1d = df_1d
@@ -223,13 +242,23 @@ def refresh_data(pair: str, state: PairState) -> PairState:
                 "%s  warm-started from parquet: %d×H1  %d×M5  %d×D — topping up from OANDA …",
                 pair.upper(), len(state.cache_h1), len(state.cache_5m), len(state.cache_1d),
             )
-            # Fall through to the incremental update below to fetch any bars
-            # newer than the last parquet entry.
+            # Fall through to incremental update to fetch any bars newer than
+            # the last parquet entry.
         except Exception as exc:
             log.info("%s  parquet unavailable (%s) — initial fetch from OANDA …", pair.upper(), exc)
-            state.cache_h1 = _fetch_oanda(pair, "H1", count=H1_MAX_BARS)
-            state.cache_5m = _fetch_oanda(pair, "M5", count=M5_MAX_BARS)
-            state.cache_1d = _fetch_oanda(pair, "D",  count=D1_MAX_BARS)
+            m1  = _fetch_oanda(pair, "M1", count=M1_MAX_BARS)
+            h1  = _fetch_oanda(pair, "H1", count=H1_MAX_BARS)
+            d1  = _fetch_oanda(pair, "D",  count=D1_MAX_BARS)
+            if not m1.empty:
+                state.cache_m1 = m1
+                state.cache_5m = _resample_m1(m1, "M5").tail(M5_MAX_BARS)
+                h1_tail        = _resample_m1(m1, "H1")
+                state.cache_h1 = _merge_cache(h1, h1_tail, H1_MAX_BARS) if not h1.empty else h1_tail.tail(H1_MAX_BARS)
+            else:
+                # M1 unavailable — fall back to native H1/M5 (no forming bar)
+                state.cache_h1 = h1
+                state.cache_5m = _fetch_oanda(pair, "M5", count=M5_MAX_BARS)
+            state.cache_1d = d1
             if not state.cache_h1.empty:
                 log.info(
                     "%s  cached: %d×H1  %d×M5  %d×D",
@@ -237,18 +266,33 @@ def refresh_data(pair: str, state: PairState) -> PairState:
                 )
             return state
 
-    h1_start = (state.cache_h1.index[-1] - H1_LOOKBACK).to_pydatetime()
-    m5_start = (state.cache_5m.index[-1] - M5_LOOKBACK).to_pydatetime()
-    d1_start = (state.cache_1d.index[-1] - D1_LOOKBACK).to_pydatetime()
+    # ── Incremental update ────────────────────────────────────────────────────
+    d1_start   = (state.cache_1d.index[-1] - D1_LOOKBACK).to_pydatetime()
+    m1_updated = False
 
-    new_h1 = _fetch_oanda(pair, "H1", start=h1_start)
-    new_5m = _fetch_oanda(pair, "M5", start=m5_start)
-    new_1d = _fetch_oanda(pair, "D",  start=d1_start)
+    if state.cache_m1 is not None:
+        m1_start = (state.cache_m1.index[-1] - M1_LOOKBACK).to_pydatetime()
+        new_m1   = _fetch_oanda(pair, "M1", start=m1_start)
+        if not new_m1.empty:
+            state.cache_m1 = _merge_cache(state.cache_m1, new_m1, M1_MAX_BARS)
+            new_h1 = _resample_m1(state.cache_m1, "H1")
+            new_5m = _resample_m1(state.cache_m1, "M5")
+            state.cache_h1 = _merge_cache(state.cache_h1, new_h1, H1_MAX_BARS)
+            state.cache_5m = _merge_cache(state.cache_5m, new_5m, M5_MAX_BARS)
+            m1_updated = True
 
-    if not new_h1.empty:
-        state.cache_h1 = _merge_cache(state.cache_h1, new_h1, H1_MAX_BARS)
-    if not new_5m.empty:
-        state.cache_5m = _merge_cache(state.cache_5m, new_5m, M5_MAX_BARS)
+    if not m1_updated:
+        # M1 unavailable this tick — fall back to native H1/M5
+        h1_start = (state.cache_h1.index[-1] - H1_LOOKBACK).to_pydatetime()
+        m5_start = (state.cache_5m.index[-1] - M5_LOOKBACK).to_pydatetime()
+        new_h1   = _fetch_oanda(pair, "H1", start=h1_start)
+        new_5m   = _fetch_oanda(pair, "M5", start=m5_start)
+        if not new_h1.empty:
+            state.cache_h1 = _merge_cache(state.cache_h1, new_h1, H1_MAX_BARS)
+        if not new_5m.empty:
+            state.cache_5m = _merge_cache(state.cache_5m, new_5m, M5_MAX_BARS)
+
+    new_1d = _fetch_oanda(pair, "D", start=d1_start)
     if not new_1d.empty:
         state.cache_1d = _merge_cache(state.cache_1d, new_1d, D1_MAX_BARS)
 
@@ -258,18 +302,6 @@ def refresh_data(pair: str, state: PairState) -> PairState:
         log.warning("%s  datalib update failed: %s", pair.upper(), exc)
 
     return state
-
-
-# ── Timing helpers ────────────────────────────────────────────────────────────
-
-def _secs_to_next_5m(offset: int = 5) -> float:
-    """Return seconds until the next completed 5m bar (boundary + offset seconds)."""
-    now          = datetime.now(timezone.utc)
-    bar_minute   = (now.minute // 5) * 5
-    bar_open     = now.replace(minute=bar_minute, second=0, microsecond=0)
-    next_bar     = bar_open + timedelta(minutes=5, seconds=offset)
-    wait         = (next_bar - now).total_seconds()
-    return max(wait, 1.0)
 
 
 # ── Spread guard ──────────────────────────────────────────────────────────────
@@ -804,14 +836,11 @@ def tick(
     if state.cache_5m is None or len(state.cache_5m) < 30:
         return state
 
-    ind       = PAIR_INDICATORS[pair]
-    # Drop the last (still-forming) H1 bar so assess_h1_bias only sees closed bars,
-    # matching the backtest which uses searchsorted to exclude the in-progress bar.
-    h1_closed = state.cache_h1.iloc[:-1]
-    df_h1 = ind.compute_h1_indicators(h1_closed.copy())
+    ind   = PAIR_INDICATORS[pair]
+    df_h1 = ind.compute_h1_indicators(state.cache_h1.copy())
     df_5m = ind.compute_m5_indicators(state.cache_5m.copy())
 
-    df_4h = h1_closed.resample("4h", label="left", closed="left").agg(
+    df_4h = state.cache_h1.resample("4h", label="left", closed="left").agg(
         {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
     ).dropna()
     df_4h = ind.compute_h1_indicators(df_4h)
@@ -1586,9 +1615,8 @@ def daemon_loop(
     occult_stops: bool,
 ) -> None:
     """
-    Main loop.  Polling strategy:
-      - idle (no open positions): sleep to next 5m boundary + 5 s
-      - positions open: poll every POSITION_POLL_SECS seconds
+    Main loop.  Polls every POLL_INTERVAL_SECS (60 s) unconditionally so that
+    each new M1 bar is evaluated as soon as it is available.
     """
     managed: dict[str, tradelib.Position]  = {}
     ctrl = ControlState()
@@ -1630,7 +1658,7 @@ def daemon_loop(
     try:
         legacy = tradelog.load_state()
         for symbol, data in legacy.items():
-            pair_key = symbol.replace("=X", "").lower().replace("-", "")
+            pair_key = symbol.lower().replace("-", "")
             if pair_key in states and states[pair_key].position is None:
                 pos_data = data.get("position")
                 if pos_data:
@@ -1677,16 +1705,7 @@ def daemon_loop(
     weekend_close_done: Optional[int]  = None
 
     while True:
-        # ── Choose sleep duration ─────────────────────────────────────────────
-        any_open = (
-            any(states[p].position for p in pairs) or bool(managed)
-        )
-        if any_open:
-            sleep_secs = float(POSITION_POLL_SECS)
-        else:
-            sleep_secs = _secs_to_next_5m(offset=5)
-
-        ctrl.wake_event.wait(timeout=sleep_secs)
+        ctrl.wake_event.wait(timeout=float(POLL_INTERVAL_SECS))
         ctrl.wake_event.clear()
 
         now     = datetime.now(timezone.utc)

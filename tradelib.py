@@ -16,7 +16,7 @@ Contents
 
 Design constraints
 ------------------
-  This module has NO imports of indicator_*.py, oanda.py, or yfinance.
+  This module has NO imports of indicator_*.py or oanda.py.
   check_position_events() accepts any duck-typed `ind` object (indicator module
   or test mock) with ATR_SL_MULT, TRAIL_ACTIVATE_FRAC, and pip_value().
   calc_units() receives pre-fetched nav and rate values from the caller.

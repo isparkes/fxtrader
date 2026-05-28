@@ -4,7 +4,7 @@ OANDA Data Library
 Manages a persistent local parquet store of historical OANDA candle data.
 
 All market data for backtesting and indicator warm-up is sourced exclusively
-from this library.  Yahoo Finance is not used anywhere in this project.
+from this library via OANDA.
 
 Storage layout
 --------------
