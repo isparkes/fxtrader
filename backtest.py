@@ -27,6 +27,8 @@ Usage
     python backtest.py --all           # all active pairs, scalp mode
     python backtest.py --all --long    # all active pairs, long mode
     python backtest.py --seed          # seed data then run
+    python backtest.py --by-week       # split results per trading week
+    python backtest.py --by-day        # split results per trading day (Mon–Fri)
 """
 
 import argparse
@@ -592,6 +594,72 @@ def report_all(results: list[tuple[str, list[dict]]], bar_mins: int = 5) -> None
     console.print(table)
 
 
+# ── Period breakdown reporting ────────────────────────────────────────────────
+
+_WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def _period_table(
+    df: pd.DataFrame,
+    group_keys: list,
+    labels: list[str],
+    title: str,
+) -> None:
+    table = Table(title=title, box=box.ROUNDED)
+    table.add_column("Period",     style="dim")
+    table.add_column("Trades",     justify="right")
+    table.add_column("Win %",      justify="right")
+    table.add_column("PF",         justify="right")
+    table.add_column("Total pips", justify="right")
+    table.add_column("Avg pips",   justify="right")
+
+    for key, label in zip(group_keys, labels):
+        grp    = df[df["_grp"] == key]
+        wins   = grp[grp["result"] == "WIN"]
+        losses = grp[grp["result"] == "LOSS"]
+        wr     = len(wins) / len(grp) * 100 if len(grp) else 0.0
+        total  = grp["pnl_pips"].sum()
+        avg    = grp["pnl_pips"].mean()
+        pf     = (
+            wins["pnl_pips"].sum() / abs(losses["pnl_pips"].sum())
+            if len(losses) and losses["pnl_pips"].sum() != 0
+            else float("inf")
+        )
+        pf_str  = f"{pf:.2f}" if pf != float("inf") else "∞"
+        c       = "green" if total > 0 else "red"
+        table.add_row(
+            label, str(len(grp)), f"{wr:.1f}%", pf_str,
+            f"[{c}]{total:.1f}[/]", f"[{c}]{avg:.1f}[/]",
+        )
+
+    console.print(table)
+
+
+def report_by_week(trades: list[dict], pair_label: str, bar_mins: int) -> None:
+    """Print a per-ISO-week breakdown table."""
+    if not trades:
+        return
+    df = pd.DataFrame(trades)
+    df["_ts"]  = pd.to_datetime(df["entry_time"], utc=True)
+    df["_grp"] = df["_ts"].dt.strftime("%G-W%V")   # ISO year + week, e.g. 2026-W21
+    keys = sorted(df["_grp"].unique())
+    mode = "long" if bar_mins >= 60 else "scalp"
+    _period_table(df, keys, keys, f"Weekly Breakdown — {pair_label}  ({mode})")
+
+
+def report_by_day(trades: list[dict], pair_label: str, bar_mins: int) -> None:
+    """Print a Mon–Fri day-of-week breakdown table."""
+    if not trades:
+        return
+    df = pd.DataFrame(trades)
+    df["_ts"]  = pd.to_datetime(df["entry_time"], utc=True)
+    df["_grp"] = df["_ts"].dt.dayofweek               # 0 = Mon
+    present    = sorted(df["_grp"].unique())
+    labels     = [_WEEKDAY_NAMES[d] for d in present]
+    mode       = "long" if bar_mins >= 60 else "scalp"
+    _period_table(df, present, labels, f"Day-of-Week Breakdown — {pair_label}  ({mode})")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -628,6 +696,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--no-blocked-days", action="store_true",
         help="Ignore BLOCKED_DAYS gate (use to compare with/without Friday block)",
+    )
+    parser.add_argument(
+        "--by-week", action="store_true",
+        help="Print per-ISO-week breakdown after the main summary",
+    )
+    parser.add_argument(
+        "--by-day", action="store_true",
+        help="Print Mon–Fri day-of-week breakdown after the main summary",
     )
     args = parser.parse_args()
 
@@ -674,6 +750,10 @@ if __name__ == "__main__":
 
         report(trades, bar_mins=bar_mins, pair_label=pair_label,
                account=args.account, risk_pct=args.risk)
+        if args.by_week:
+            report_by_week(trades, pair_label=pair_label, bar_mins=bar_mins)
+        if args.by_day:
+            report_by_day(trades, pair_label=pair_label, bar_mins=bar_mins)
         all_results.append((pair_label, trades))
 
     if args.all:
