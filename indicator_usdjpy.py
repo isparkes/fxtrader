@@ -133,7 +133,7 @@ M5_ATR_MIN       = 0.0002   # 2 pips — don't scalp a dead market
 
 # Risk — tight scalper targets
 ATR_PERIOD        = 14
-ATR_SL_MULT       = 0.4   # ~4-8 pip stop
+ATR_TRAIL_MULT       = 0.4   # trailing stop distance: ATR × 0.4 behind best price
 ATR_TP_MULT       = 3.0   # wide ceiling — trailing stop usually exits first
 
 # Pattern D — HA pullback stop parameters
@@ -506,7 +506,7 @@ def compute_sl_tp(
             return None
         return entry_p, sl, tp
 
-    sl_pips = max(HA_SL_MIN_PIPS, min(HA_SL_MAX_PIPS, atr * ATR_SL_MULT / pv))
+    sl_pips = max(HA_SL_MIN_PIPS, min(HA_SL_MAX_PIPS, atr * ATR_TRAIL_MULT / pv))
     sl_dist = sl_pips * pv
     if bias == "BUY":
         entry_p = ep + spread
@@ -526,7 +526,7 @@ def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD", s
     the trend indicator values filled in for diagnostic purposes.
 
     Otherwise computes:
-        stop_loss   = entry ± ATR × ATR_SL_MULT
+        stop_loss   = entry ± ATR × ATR_TRAIL_MULT
         take_profit = entry ± ATR × ATR_TP_MULT  (wide ceiling)
         risk_pips / reward_pips / rr_ratio derived from the above
     """
@@ -578,7 +578,7 @@ def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD", s
                 risk_pips=None, reward_pips=None, rr_ratio=None,
             )
     else:
-        sl_pips = max(HA_SL_MIN_PIPS, min(HA_SL_MAX_PIPS, atr * ATR_SL_MULT / pv))
+        sl_pips = max(HA_SL_MIN_PIPS, min(HA_SL_MAX_PIPS, atr * ATR_TRAIL_MULT / pv))
         sl_dist = sl_pips * pv
         if direction == "BUY":
             sl = ep_adj - sl_dist
@@ -589,6 +589,17 @@ def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD", s
         risk_pips   = sl_pips
         reward_pips = abs(tp - ep_adj) / pv
         rr          = reward_pips / risk_pips if risk_pips > 0 else 0
+        if rr < HA_MIN_RR:
+            return Signal(
+                timestamp=now_str, direction="FLAT",
+                entry_price=None, stop_loss=None, take_profit=None,
+                atr=round(atr, 5),
+                h1_macd_hist=round(h1_bias["macd_hist"], 6),
+                h1_rsi=round(h1_bias["h1_rsi"], 1),
+                h1_trend=h1_bias["trend"],
+                entry_basis=f"{pattern} suppressed: R:R {rr:.2f} < {HA_MIN_RR} minimum",
+                risk_pips=None, reward_pips=None, rr_ratio=None,
+            )
 
     pattern_labels = {
         "A-ema-cross":       "5m EMA8/21 cross",

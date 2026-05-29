@@ -145,7 +145,7 @@ M5_ATR_MIN      = 0.0002   # 2 pips — don't scalp a dead market
 
 # Risk — patterns A, C, E
 ATR_PERIOD  = 14
-ATR_SL_MULT = 0.4   # ~4–10 pip stop on EURJPY's wider ATR
+ATR_TRAIL_MULT = 0.4   # trailing stop distance: ATR × 0.4 behind best price
 ATR_TP_MULT = 3.0   # wide ceiling — trailing stop usually exits first
 
 # Pattern D — HA pullback stop parameters
@@ -535,7 +535,7 @@ def compute_sl_tp(
             return None
         return entry_p, sl, tp
 
-    sl_pips = max(HA_SL_MIN_PIPS, min(HA_SL_MAX_PIPS, atr * ATR_SL_MULT / pv))
+    sl_pips = max(HA_SL_MIN_PIPS, min(HA_SL_MAX_PIPS, atr * ATR_TRAIL_MULT / pv))
     sl_dist = sl_pips * pv
     if bias == "BUY":
         entry_p = ep + spread
@@ -603,7 +603,7 @@ def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURJPY",
                 risk_pips=None, reward_pips=None, rr_ratio=None,
             )
     else:
-        sl_pips = max(HA_SL_MIN_PIPS, min(HA_SL_MAX_PIPS, atr * ATR_SL_MULT / pv))
+        sl_pips = max(HA_SL_MIN_PIPS, min(HA_SL_MAX_PIPS, atr * ATR_TRAIL_MULT / pv))
         sl_dist = sl_pips * pv
         if direction == "BUY":
             sl = ep_adj - sl_dist

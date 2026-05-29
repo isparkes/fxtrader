@@ -1171,4 +1171,80 @@ GBPUSD and AUDUSD: no signals this week.
 
 ---
 
+## Snapshot — 2026-05-29
+
+**Period:** scalp = 90d ending 2026-05-28 (parquet store current as of May 28 close)
+**Changes since last snapshot:** None. Routine weekly snapshot to capture May 26–28 window absorption.
+
+### Scalp mode — 90d · 5m bars
+
+90d net-change (approx, per May 26 baseline): EURUSD −1.2% (TREND_DOWN) · USDJPY +1.7% (TREND_UP) · AUDUSD +1.1% (TREND_UP) · EURJPY +0.6% (FLAT)
+
+| Pair   | Market Regime | Trades | Win%  | Avg W   | Avg L   |  PF  | Expec      | Total      | Max DD      |
+|--------|---------------|--------|-------|---------|---------|------|------------|------------|-------------|
+| EURUSD | TREND_DOWN    |     57 | 52.6% |  29.7 p |  11.1 p | 2.97 |  10.4 p/tr |    590.8 p |    −44.0 p  |
+| USDJPY | TREND_UP      |     44 | 34.1% |  47.6 p |  10.2 p | 2.41 |   9.5 p/tr |    417.0 p |    −54.0 p  |
+| AUDUSD | TREND_UP      |     26 | 46.2% |  38.0 p |  11.7 p | 2.79 |  11.3 p/tr |    292.7 p |    −34.5 p  |
+| EURJPY | FLAT          |     25 | 32.0% |  44.8 p |  12.6 p | 1.68 |   5.8 p/tr |    144.5 p |    −84.0 p  |
+
+(p = pips · tr = trade · USDJPY: Patterns D+E, ADX exempt; EURUSD/AUDUSD: A+C+D; EURJPY: A+C+D+E · EURJPY candidate only, not yet in live rotation · GBPUSD not run)
+
+### vs. prior snapshot (2026-05-26)
+
+| Pair   | PF before | PF after | Trades Δ | Total pips Δ | Max DD Δ |
+|--------|-----------|----------|----------|--------------|----------|
+| EURUSD | 3.02      | **2.97** | +2       | +5.8         | stable   |
+| USDJPY | 2.84      | **2.41** | +2       | −84.8        | −52→−54  |
+| AUDUSD | 2.60      | **2.79** | −1       | +11.5        | stable   |
+| EURJPY | 1.73¹     | **1.68** | +3       | +5.0         | −96→−84  |
+
+¹ From 2026-05-26 candidate evaluation (same data window)
+
+### Last-30-day daily breakdown (all active pairs combined, Apr 28–May 28)
+
+| Date        | DOW | Tr | W | L | WR%   | Pips    | Cumul   |
+|-------------|-----|----|---|---|-------|---------|---------|
+| 2026-04-28  | Tue |  2 | 2 | 0 | 100%  | +82.5   | +82.5   |
+| 2026-04-29  | Wed |  3 | 1 | 2 |  33%  |  −2.6   | +79.9   |
+| 2026-04-30  | Thu |  6 | 4 | 2 |  67%  | +193.8  | +273.7  |
+| 2026-05-04  | Mon |  2 | 1 | 1 |  50%  | +11.7   | +285.4  |
+| 2026-05-05  | Tue |  2 | 1 | 1 |  50%  | +31.6   | +317.0  |
+| 2026-05-06  | Wed |  4 | 2 | 2 |  50%  | +20.8   | +337.8  |
+| 2026-05-07  | Thu |  1 | 0 | 1 |   0%  | −11.0   | +326.8  |
+| 2026-05-11  | Mon |  2 | 1 | 1 |  50%  | +17.1   | +343.9  |
+| 2026-05-12  | Tue |  2 | 1 | 1 |  50%  |  +9.4   | +353.3  |
+| 2026-05-13  | Wed |  1 | 1 | 0 | 100%  | +21.8   | +375.1  |
+| 2026-05-14  | Thu |  4 | 3 | 1 |  75%  | +121.7  | +496.8  |
+| 2026-05-18  | Mon |  1 | 0 | 1 |   0%  | −12.0   | +484.8  |
+| 2026-05-19  | Tue |  4 | 3 | 1 |  75%  | +85.1   | +569.9  |
+| 2026-05-20  | Wed |  1 | 0 | 1 |   0%  |  −9.6   | +560.3  |
+| 2026-05-21  | Thu |  4 | 2 | 2 |  50%  | +21.4   | +581.7  |
+| 2026-05-25  | Mon |  1 | 0 | 1 |   0%  | −12.0   | +569.7  |
+| 2026-05-26  | Tue |  4 | 0 | 4 |   0%  | −41.0   | +528.7  |
+| 2026-05-27  | Wed |  6 | 1 | 5 |  17%  | −36.3   | +492.4  |
+| 2026-05-28  | Thu |  3 | 1 | 2 |  33%  | +11.0   | +503.4  |
+| **TOTAL**   |     | 53 |24 |29 |**45%**|**+503.4**|        |
+
+30d pair breakdown: EURUSD 20t / 60% WR / +182.6p · USDJPY 16t / 25% WR / +80.3p · EURJPY 17t / 47% WR / +240.5p · AUDUSD 0t (no signals in last 30d — ADX gate suppressing)
+
+### Live trades this week (May 25–28)
+
+| ID  | Pair   | Dir  | Entry   | Exit    | PnL     | Reason   | Signal         |
+|-----|--------|------|---------|---------|---------|----------|----------------|
+| 728 | EURUSD | BUY  | 1.16255 | 1.16406 | +15.1 p | SL (BE+) | MACD flip      |
+| 744 | USDJPY | SELL | 159.273 | 159.341 |  −6.8 p | SL       | ST flip        |
+| 758 | USDJPY | SELL | 159.195 | 159.315 | −12.0 p | SL       | HA pullback    |
+| 767 | USDJPY | SELL | 159.147 | 159.267 | −12.0 p | SL       | HA pullback    |
+| 751 | EURUSD | BUY  | 1.16538 | —       | open    | —        | HA pullback    |
+
+Live closed PnL: −15.7 pips (4 closed, 1 open at time of snapshot).
+
+### Notes
+
+- **EURUSD stable** — PF 3.02 → 2.97, within noise. Two new trades added without disrupting the win rate (52.7% → 52.6%) or drawdown. Pair continues to be the most consistent performer by WR.
+- **USDJPY dip — key observation.** PF 2.84 → 2.41 is the most significant single-week move since the Supertrend addition (May 9). Caused by the May 26–28 cluster: 3 consecutive SELL entries all stopped out with USDJPY ranging in a tight 159.15–159.35 band. The pair is still above PF 2.0 and avg win (47.6 p) remains healthy. Monitor W22 — if another poor week follows and PF approaches 2.0, that would be the first structural concern since USDJPY has been exempt from the ADX gate and relies on Supertrend/HA for self-selection. No action yet.
+- **AUDUSD improved (2.60 → 2.79)** with one old loser rolling off the window. Continues to be the tightest drawdown pair (−34.5 p). Still generating zero signals in the last 30 days — the ADX gate is correctly holding it out of a low-trend environment on real OANDA data.
+- **EURJPY — PF 1.68, 3 new trades.** DD improved from −96 p to −84 p as older losses rolled off. Pattern D dominates (+131.7 p / 8 trades); Pattern A still a net drag. Candidate for GBPUSD replacement once GBPUSD is retired. No change to the watch/defer decision from May 26.
+- **May 26–28 was a RANGE-like period** for USDJPY (25% WR, choppy JPY). The early-week indicator (per regime/RR analysis): by end of Tuesday May 26 the TP rate was 0% across the roster — a RANGE warning. Week closed at 33% WR which matches the RANGE classification threshold. Consistent with prior regime analysis findings.
+
 ---

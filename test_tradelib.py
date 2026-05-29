@@ -52,7 +52,7 @@ from tradelib import (
 
 class _Ind:
     """Minimal mock indicator module for testing."""
-    ATR_SL_MULT         = 0.4
+    ATR_TRAIL_MULT      = 0.4
     TRAIL_ACTIVATE_FRAC = 0.8
 
     @staticmethod
@@ -267,14 +267,14 @@ class TestPhase3Extension:
         # New TP = entry + 2 * 30 pips = 1.08000 + 0.00600 = 1.08600
         assert abs(pos.take_profit - 1.08600) < 1e-7
 
-    def test_buy_ha_disagrees_no_extension(self):
-        """BUY reaches TP with bearish HA candle → close_tp, no extension."""
+    def test_buy_ha_disagrees_still_extends(self):
+        """Phase 3 is unconditional: TP hit with bearish HA still fires extend_tp."""
         pos = _buy()
         bar = _bar(high=1.08310, low=1.08100, ha_close=1.08200, ha_open=1.08305)
         events = check_position_events(pos, bar, _Ind())
 
-        assert any(e[0] == "close_tp" for e in events)
-        assert not any(e[0] == "extend_tp" for e in events)
+        assert any(e[0] == "extend_tp" for e in events)
+        assert not any(e[0].startswith("close") for e in events)
 
     def test_sell_ha_agrees_extend_fires(self):
         """SELL reaches TP with bearish HA candle → extend_tp, no close event."""
@@ -305,15 +305,14 @@ class TestPhase3Extension:
         assert any(e[0] == "close_tp" for e in events)
         assert not any(e[0] == "extend_tp" for e in events)
 
-    def test_missing_ha_columns_no_extension(self):
-        """Bar with no HA columns → momentum_ok = False → close_tp."""
+    def test_missing_ha_columns_still_extends(self):
+        """Phase 3 is unconditional: TP hit without HA columns still fires extend_tp."""
         pos = _buy()
-        # Bar hits TP but has no HA data
         bar = _bar(high=1.08310, low=1.08100)   # ha_close and ha_open are NaN
         events = check_position_events(pos, bar, _Ind())
 
-        assert any(e[0] == "close_tp" for e in events)
-        assert not any(e[0] == "extend_tp" for e in events)
+        assert any(e[0] == "extend_tp" for e in events)
+        assert not any(e[0].startswith("close") for e in events)
 
 
 # ── SL / TP close events ──────────────────────────────────────────────────────
@@ -334,12 +333,13 @@ class TestCloseEvents:
         events = check_position_events(pos, bar, _Ind())
         assert any(e[0] == "close_sl" for e in events)
 
-    def test_buy_tp_hit_no_ha(self):
-        """BUY reaches TP with no HA data → close_tp (no extension possible)."""
+    def test_buy_tp_hit_extends_first(self):
+        """BUY first TP hit → extend_tp (Phase 3 unconditional); close_tp on second hit."""
         pos = _buy()
         bar = _bar(high=1.08310, low=1.08200)
         events = check_position_events(pos, bar, _Ind())
-        assert any(e[0] == "close_tp" for e in events)
+        assert any(e[0] == "extend_tp" for e in events)
+        assert not any(e[0] == "close_tp" for e in events)
 
     def test_neither_sl_nor_tp_no_event(self):
         """Bar within range → no close or be events."""
@@ -349,19 +349,20 @@ class TestCloseEvents:
         assert not any(e[0].startswith("close") for e in events)
         assert not any(e[0] == "be" for e in events)
 
-    def test_both_sl_and_tp_in_bar_tp_wins(self):
+    def test_both_sl_and_tp_in_bar_phase3_wins(self):
         """
-        When both SL and TP are within the bar's range, close_tp takes priority
-        (matching the existing behaviour: check is `elif`, not `if`).
-        This case is resolved accurately in backtesting via M1 simulation.
+        When both SL and TP are within the bar's range, Phase 3 intercepts the
+        TP hit first and fires extend_tp — SL does not close the trade.
+        (M1 simulation resolves the actual order in backtesting.)
         """
         pos = _buy(sl=1.07960, tp=1.08300)
         # Bar engulfs both SL and TP
         bar = _bar(high=1.08310, low=1.07950, ha_close=1.08200, ha_open=1.08305)
         events = check_position_events(pos, bar, _Ind())
         event_names = [e[0] for e in events]
-        assert "close_tp" in event_names
+        assert "extend_tp" in event_names
         assert "close_sl" not in event_names
+        assert "close_tp" not in event_names
 
     def test_position_not_mutated_when_no_events(self):
         """A quiet bar should not change any position state."""

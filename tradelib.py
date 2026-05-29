@@ -18,7 +18,7 @@ Design constraints
 ------------------
   This module has NO imports of indicator_*.py or oanda.py.
   check_position_events() accepts any duck-typed `ind` object (indicator module
-  or test mock) with ATR_SL_MULT, TRAIL_ACTIVATE_FRAC, and pip_value().
+  or test mock) with ATR_TRAIL_MULT, TRAIL_ACTIVATE_FRAC, and pip_value().
   calc_units() receives pre-fetched nav and rate values from the caller.
 """
 
@@ -123,7 +123,7 @@ def check_position_events(
     Evaluate the latest bar against an open position and return a list of events.
 
     `ind` is any object (indicator module or test mock) that exposes:
-        ind.ATR_SL_MULT          float   — trail distance multiplier
+        ind.ATR_TRAIL_MULT          float   — trail distance multiplier
         ind.TRAIL_ACTIVATE_FRAC  float   — optional; defaults to 0.80
         ind.pip_value(pair)      float   — pip size for the pair
 
@@ -134,7 +134,7 @@ def check_position_events(
         entry, SL moves to entry price (risk to zero).
 
     Phase 2 — Active trail:
-        After Phase 1, SL ratchets ATR × ATR_SL_MULT behind the running best
+        After Phase 1, SL ratchets ATR × ATR_TRAIL_MULT behind the running best
         price each bar.
 
     Phase 3 — TP extension (momentum gate):
@@ -142,7 +142,7 @@ def check_position_events(
         agrees with trade direction, the trade is extended rather than closed:
           • SL locks at 90% of the original TP distance from entry
           • TP doubles to 2× the original TP distance
-          • Trail tightens to ATR × ATR_SL_MULT × 0.5
+          • Trail tightens to ATR × ATR_TRAIL_MULT × 0.5
 
     Returns an ordered list of (event_name, price) tuples:
         "be"        — stop moved to breakeven; position remains open
@@ -212,7 +212,7 @@ def check_position_events(
 
     # ── Phase 2 — active trailing (only runs when position is not closing) ────
     if pos.be_activated:
-        trail_dist = pos.atr * ind.ATR_SL_MULT * (0.5 if pos.tp_extended else 1.0)
+        trail_dist = pos.atr * ind.ATR_TRAIL_MULT * (0.5 if pos.tp_extended else 1.0)
         if pos.direction == "BUY":
             pos.best_price = max(pos.best_price, high)
             new_trail = pos.best_price - trail_dist
@@ -247,7 +247,7 @@ def calc_registration_levels(
     Returns (sl, tp, be_activated, best_price).
     """
     sign = 1 if direction == "BUY" else -1
-    sl   = entry_price - sign * atr * ind.ATR_SL_MULT
+    sl   = entry_price - sign * atr * ind.ATR_TRAIL_MULT
     tp   = entry_price + sign * atr * ind.ATR_TP_MULT
 
     trail_frac   = getattr(ind, "TRAIL_ACTIVATE_FRAC", _DEFAULT_TRAIL_ACTIVATE_FRAC)
@@ -262,7 +262,7 @@ def calc_registration_levels(
 
     if prog_pips >= tp_dist_pips * trail_frac:
         be_activated = True
-        trail_dist   = atr * ind.ATR_SL_MULT
+        trail_dist   = atr * ind.ATR_TRAIL_MULT
         trailing_sl  = (
             current_price - trail_dist if direction == "BUY"
             else current_price + trail_dist
@@ -276,8 +276,8 @@ def calc_registration_levels(
         (direction == "SELL" and current_price >= sl)
     ):
         sl = (
-            current_price - atr * ind.ATR_SL_MULT if direction == "BUY"
-            else current_price + atr * ind.ATR_SL_MULT
+            current_price - atr * ind.ATR_TRAIL_MULT if direction == "BUY"
+            else current_price + atr * ind.ATR_TRAIL_MULT
         )
 
     return sl, tp, be_activated, best_price

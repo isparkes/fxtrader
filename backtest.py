@@ -16,8 +16,11 @@ Two modes:
     Entry : H1 bars  (up to 730 days stored)
     No M1 simulation (H1 bars used directly)
 
-Both modes delegate all indicator logic to the pair's indicator module and all
-trailing-stop logic to tradelib.check_position_events().
+Both modes delegate all indicator logic to the pair's indicator module.
+Position management uses a broker-native trailing stop: the stop trails at a
+fixed distance (initial risk_pips × pip_value) from the best price seen since
+entry.  TP/SL resolution is bar-by-bar (M1 in scalp mode); within a single M1
+bar the order of TP vs trailing-SL hit is unresolvable.
 
 Usage
 -----
@@ -69,13 +72,14 @@ PAIR_CONFIG: dict[str, dict] = {
     "eurjpy": {"spread_scalp": 2.0, "spread_long": 1.5},
 }
 
-ACTIVE_PAIRS = ["eurusd", "gbpusd", "usdjpy", "audusd"]
+ACTIVE_PAIRS = ["eurusd", "usdjpy", "audusd", "eurjpy"]
 
 console = Console()
 
 COOLDOWN_BARS     = 12     # 12 × 5m = 60 min pause after a loss
 SESSION_START_UTC = 7      # London open
 SESSION_END_UTC   = 16     # NY afternoon / London close
+WEEKEND_CLOSE_HOUR = 20    # Friday UTC hour at which positions are force-closed
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -248,41 +252,33 @@ def run_backtest(
         if pos is not None:
             closed = False
 
-            if m1_index is not None:
-                # Step through M1 bars within this M5 window
-                m5_end = ts + pd.Timedelta(minutes=bar_mins)
-                lo = m1_index.searchsorted(ts,    side="left")
-                hi = m1_index.searchsorted(m5_end, side="left")
+            def _process_bar(h: float, l: float) -> Optional[tuple[str, float]]:
+                bar_s = pd.Series({"high": h, "low": l})
+                for evt_name, evt_price in tradelib.check_position_events(pos, bar_s, ind):
+                    if evt_name in ("close_tp", "close_sl"):
+                        return (evt_name, evt_price)
+                return None
+
+            if ts.weekday() == 4 and ts.hour >= WEEKEND_CLOSE_HOUR:
+                _record_trade(
+                    trades, pos, float(row["open"]), pv, spread_pips,
+                    i, entry_idx, bar_mins, entry_pattern, forced=True,
+                )
+                if trades[-1]["result"] == "LOSS":
+                    cooldown_until = i + COOLDOWN_BARS
+                pos    = None
+                closed = True
+            elif m1_index is not None:
+                m5_end   = ts + pd.Timedelta(minutes=bar_mins)
+                lo       = m1_index.searchsorted(ts,     side="left")
+                hi       = m1_index.searchsorted(m5_end, side="left")
                 m1_slice = df_m1.iloc[lo:hi]
 
                 for _, m1_bar in m1_slice.iterrows():
-                    # Carry the M5 HA columns into the M1 bar for Phase 3 gate
-                    m1_row = m1_bar.copy()
-                    if "ha_close" in row.index:
-                        m1_row["ha_close"] = row["ha_close"]
-                        m1_row["ha_open"]  = row["ha_open"]
-
-                    events = tradelib.check_position_events(pos, m1_row, ind)
-                    for evt_name, evt_price in events:
-                        if evt_name in ("close_tp", "close_sl"):
-                            _record_trade(
-                                trades, pos, evt_price, pv, spread_pips,
-                                i, entry_idx, bar_mins, entry_pattern,
-                            )
-                            if trades[-1]["result"] == "LOSS":
-                                cooldown_until = i + COOLDOWN_BARS
-                            pos    = None
-                            closed = True
-                            break
-                    if closed:
-                        break
-            else:
-                # No M1 data — evaluate against M5 bar directly
-                events = tradelib.check_position_events(pos, row, ind)
-                for evt_name, evt_price in events:
-                    if evt_name in ("close_tp", "close_sl"):
+                    evt = _process_bar(float(m1_bar["high"]), float(m1_bar["low"]))
+                    if evt is not None:
                         _record_trade(
-                            trades, pos, evt_price, pv, spread_pips,
+                            trades, pos, evt[1], pv, spread_pips,
                             i, entry_idx, bar_mins, entry_pattern,
                         )
                         if trades[-1]["result"] == "LOSS":
@@ -290,6 +286,17 @@ def run_backtest(
                         pos    = None
                         closed = True
                         break
+            else:
+                evt = _process_bar(float(row["high"]), float(row["low"]))
+                if evt is not None:
+                    _record_trade(
+                        trades, pos, evt[1], pv, spread_pips,
+                        i, entry_idx, bar_mins, entry_pattern,
+                    )
+                    if trades[-1]["result"] == "LOSS":
+                        cooldown_until = i + COOLDOWN_BARS
+                    pos    = None
+                    closed = True
 
             if pos is not None or closed:
                 continue
@@ -387,6 +394,7 @@ def run_backtest(
             opened_at    = str(ts),
             basis        = entry_result.get("pattern", ""),
             original_tp  = tp,
+            best_price   = entry_p,
         )
         entry_idx     = i
         entry_pattern = entry_result.get("pattern", "")
@@ -404,6 +412,7 @@ def _record_trade(
     entry_idx:    int,
     bar_mins:     int,
     pattern:      str,
+    forced:       bool = False,
 ) -> None:
     held     = bar_idx - entry_idx
     pnl_pips = (
@@ -422,7 +431,7 @@ def _record_trade(
         "held_mins":  held * bar_mins,
         "pnl_pips":   round(pnl_pips, 1),
         "result":     result,
-        "forced":     False,
+        "forced":     forced,
         "pattern":    pattern,
         "extended":   pos.tp_extended,
     })
@@ -635,6 +644,47 @@ def _period_table(
     console.print(table)
 
 
+def report_by_pattern(trades: list[dict], pair_label: str, bar_mins: int) -> None:
+    """Print a per-entry-pattern breakdown table."""
+    if not trades:
+        return
+    df    = pd.DataFrame(trades)
+    mode  = "long" if bar_mins >= 60 else "scalp"
+    table = Table(title=f"Pattern Breakdown — {pair_label}  ({mode})", box=box.ROUNDED)
+    table.add_column("Pattern",    style="dim")
+    table.add_column("Trades",     justify="right")
+    table.add_column("Win %",      justify="right")
+    table.add_column("Avg W",      justify="right")
+    table.add_column("Avg L",      justify="right")
+    table.add_column("PF",         justify="right")
+    table.add_column("Total pips", justify="right")
+    table.add_column("Avg pips",   justify="right")
+
+    for pattern in sorted(df["pattern"].unique()):
+        grp    = df[df["pattern"] == pattern]
+        wins   = grp[grp["result"] == "WIN"]
+        losses = grp[grp["result"] == "LOSS"]
+        wr     = len(wins) / len(grp) * 100 if len(grp) else 0.0
+        aw     = wins["pnl_pips"].mean()        if len(wins)   else 0.0
+        al     = abs(losses["pnl_pips"].mean()) if len(losses) else 0.0
+        total  = grp["pnl_pips"].sum()
+        avg    = grp["pnl_pips"].mean()
+        pf     = (
+            wins["pnl_pips"].sum() / abs(losses["pnl_pips"].sum())
+            if len(losses) and losses["pnl_pips"].sum() != 0
+            else float("inf")
+        )
+        pf_str = f"{pf:.2f}" if pf != float("inf") else "∞"
+        c      = "green" if total > 0 else "red"
+        table.add_row(
+            pattern, str(len(grp)), f"{wr:.1f}%",
+            f"{aw:.1f}", f"{al:.1f}", pf_str,
+            f"[{c}]{total:.1f}[/]", f"[{c}]{avg:.1f}[/]",
+        )
+
+    console.print(table)
+
+
 def report_by_week(trades: list[dict], pair_label: str, bar_mins: int) -> None:
     """Print a per-ISO-week breakdown table."""
     if not trades:
@@ -705,6 +755,10 @@ if __name__ == "__main__":
         "--by-day", action="store_true",
         help="Print Mon–Fri day-of-week breakdown after the main summary",
     )
+    parser.add_argument(
+        "--by-pattern", action="store_true",
+        help="Print per-entry-pattern (A/C/D/E) breakdown after the main summary",
+    )
     args = parser.parse_args()
 
     do_update = not args.no_update
@@ -754,6 +808,8 @@ if __name__ == "__main__":
             report_by_week(trades, pair_label=pair_label, bar_mins=bar_mins)
         if args.by_day:
             report_by_day(trades, pair_label=pair_label, bar_mins=bar_mins)
+        if args.by_pattern:
+            report_by_pattern(trades, pair_label=pair_label, bar_mins=bar_mins)
         all_results.append((pair_label, trades))
 
     if args.all:

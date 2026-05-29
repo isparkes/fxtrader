@@ -120,22 +120,22 @@ def place_market_order(
     pair: str,
     direction: str,
     units: int,
-    stop_loss: float,
+    trailing_distance: float,
     take_profit: float,
     occult_stops: bool = False,
 ) -> dict:
     """
-    Place a market order, optionally without broker-side SL/TP orders.
+    Place a market order with a broker-side trailing stop and optional TP.
 
     Args:
-        pair:         internal key, e.g. "eurusd"
-        direction:    "BUY" or "SELL"
-        units:        positive integer — sign is applied from direction
-        stop_loss:    absolute price level
-        take_profit:  absolute price level
-        occult_stops: when True, omit stopLossOnFill/takeProfitOnFill so no
-                      stop orders are visible to the broker (stop-hunt defence).
-                      The daemon closes the trade explicitly when levels are hit.
+        pair:              internal key, e.g. "eurusd"
+        direction:         "BUY" or "SELL"
+        units:             positive integer — sign is applied from direction
+        trailing_distance: trailing stop distance in price units (e.g. 0.0012)
+        take_profit:       absolute price level
+        occult_stops:      when True, omit trailingStopLossOnFill/takeProfitOnFill
+                           so no stop orders are visible to the broker.
+                           The daemon closes the trade explicitly when levels are hit.
 
     Returns the full Oanda order-fill response dict.
     The trade ID lives at response["orderFillTransaction"]["tradeOpened"]["tradeID"].
@@ -150,8 +150,8 @@ def place_market_order(
         "timeInForce": "FOK",
     }
     if not occult_stops:
-        order["stopLossOnFill"]   = {"price": _fmt_price(pair, stop_loss)}
-        order["takeProfitOnFill"] = {"price": _fmt_price(pair, take_profit)}
+        order["trailingStopLossOnFill"] = {"distance": _fmt_price(pair, trailing_distance)}
+        order["takeProfitOnFill"]       = {"price":    _fmt_price(pair, take_profit)}
     payload = {"order": order}
     url = f"{_BASE_URL}/v3/accounts/{_ACCOUNT_ID}/orders"
     resp = requests.post(url, headers=_headers(), json=payload, timeout=10)
@@ -163,8 +163,18 @@ def place_market_order(
     return resp.json()
 
 
+def set_trailing_stop(trade_id: str, distance: float, pair: str = "") -> dict:
+    """Replace the current stop order on a trade with a trailing stop."""
+    _require_config()
+    url = f"{_BASE_URL}/v3/accounts/{_ACCOUNT_ID}/trades/{trade_id}/orders"
+    payload = {"trailingStopLoss": {"distance": _fmt_price(pair, distance)}}
+    resp = requests.put(url, headers=_headers(), json=payload, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def modify_trade_sl(trade_id: str, stop_loss: float, pair: str = "") -> dict:
-    """Move the stop-loss on an open trade (e.g. to breakeven)."""
+    """Set a fixed stop-loss on an open trade, replacing any trailing stop."""
     _require_config()
     url = f"{_BASE_URL}/v3/accounts/{_ACCOUNT_ID}/trades/{trade_id}/orders"
     payload = {"stopLoss": {"price": _fmt_price(pair, stop_loss)}}

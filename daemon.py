@@ -84,6 +84,7 @@ import indicator_eurusd
 import indicator_gbpusd
 import indicator_usdjpy
 import indicator_audusd
+import indicator_eurjpy
 import oanda
 import datalib
 import logsetup
@@ -100,6 +101,7 @@ PAIR_INDICATORS = {
     "gbpusd": indicator_gbpusd,
     "usdjpy": indicator_usdjpy,
     "audusd": indicator_audusd,
+    "eurjpy": indicator_eurjpy,
 }
 
 STANDARD_SPREADS: dict[str, float] = {
@@ -707,18 +709,7 @@ def _process_events(
 
     for event, price in events:
         if event == "be":
-            log.info("%s  BE — SL → %.5f", pair.upper(), pos.entry_price)
-            _log_be(pos)
-            if live and pos.trade_id and (not pos.occult_stops or pos.sl_materialised):
-                try:
-                    oanda.modify_trade_sl(pos.trade_id, pos.entry_price, pair)
-                except Exception as exc:
-                    log.warning("%s  OANDA BE failed: %s", pair.upper(), exc)
-            subj, body = _email_be(pos)
-            if dry_run:
-                log.info("[DRY-RUN] %s", subj)
-            else:
-                send_email(subj, body)
+            pass  # trailing stop is broker-managed; no action needed
 
         elif event == "extend_tp":
             log.info(
@@ -790,17 +781,6 @@ def _process_events(
             closed     = True
             exit_price = actual_price
             break
-
-    if not closed and pos.stop_loss != prev_sl and live and pos.trade_id:
-        if not pos.occult_stops or pos.sl_materialised:
-            try:
-                oanda.modify_trade_sl(pos.trade_id, pos.stop_loss, pair)
-                log.info(
-                    "%s  trailing SL %.5f → %.5f",
-                    pair.upper(), prev_sl, pos.stop_loss,
-                )
-            except Exception as exc:
-                log.warning("%s  trailing SL update failed: %s", pair.upper(), exc)
 
     return closed, exit_price
 
@@ -959,15 +939,18 @@ def _open_automated(
     rr_ratio    = signal.rr_ratio
 
     if live:
-        units = _calc_units(pair, signal.risk_pips)
+        ind               = PAIR_INDICATORS[pair]
+        pv                = ind.pip_value(pair)
+        trailing_distance = round(signal.risk_pips * pv, 5)
+        units             = _calc_units(pair, signal.risk_pips)
         try:
             result = oanda.place_market_order(
-                pair         = pair,
-                direction    = signal.direction,
-                units        = units,
-                stop_loss    = signal.stop_loss,
-                take_profit  = signal.take_profit,
-                occult_stops = occult_stops,
+                pair              = pair,
+                direction         = signal.direction,
+                units             = units,
+                trailing_distance = trailing_distance,
+                take_profit       = signal.take_profit,
+                occult_stops      = occult_stops,
             )
             if "orderFillTransaction" not in result:
                 cancel = result.get("orderCancelTransaction", {})
@@ -977,18 +960,10 @@ def _open_automated(
             trade_id = result["orderFillTransaction"]["tradeOpened"]["tradeID"]
             fill_str = result["orderFillTransaction"].get("price")
             if fill_str:
-                ind         = PAIR_INDICATORS[pair]
-                pv          = ind.pip_value(pair)
                 entry_price = round(float(fill_str), 5)
-                old_sl      = stop_loss
                 stop_loss, risk_pips, reward_pips, rr_ratio = tradelib.adjust_sl_for_fill(
                     entry_price, stop_loss, signal.take_profit, signal.direction, ind, pv,
                 )
-                if stop_loss != old_sl and not occult_stops:
-                    try:
-                        oanda.modify_trade_sl(trade_id, stop_loss, pair)
-                    except Exception:
-                        pass
         except Exception as exc:
             log.error("%s  OANDA order failed — will retry next poll: %s", pair.upper(), exc)
             return state
