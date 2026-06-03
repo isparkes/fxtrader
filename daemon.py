@@ -934,6 +934,7 @@ def _open_automated(
     trade_id    = None
     entry_price = signal.entry_price
     stop_loss   = signal.stop_loss
+    take_profit = signal.take_profit
     risk_pips   = signal.risk_pips
     reward_pips = signal.reward_pips
     rr_ratio    = signal.rr_ratio
@@ -961,9 +962,34 @@ def _open_automated(
             fill_str = result["orderFillTransaction"].get("price")
             if fill_str:
                 entry_price = round(float(fill_str), 5)
+                # Shift TP by fill slippage to preserve the original reward distance
+                # from entry.  SL is snapped to HA_SL_MAX_PIPS from fill; without
+                # this TP shift, a stale signal filled well above the signal bar close
+                # produces a TP only a fraction of a pip above the fill.
+                slippage    = entry_price - signal.entry_price
+                take_profit = round(signal.take_profit + slippage, 5)
                 stop_loss, risk_pips, reward_pips, rr_ratio = tradelib.adjust_sl_for_fill(
-                    entry_price, stop_loss, signal.take_profit, signal.direction, ind, pv,
+                    entry_price, stop_loss, take_profit, signal.direction, ind, pv,
                 )
+                min_rr = getattr(ind, "HA_MIN_RR", 1.5)
+                if rr_ratio < min_rr:
+                    log.warning(
+                        "%s  post-fill R:R %.2f < %.1f — closing immediately",
+                        pair.upper(), rr_ratio, min_rr,
+                    )
+                    try:
+                        oanda.close_trade(trade_id)
+                    except Exception:
+                        pass
+                    raise RuntimeError(
+                        f"Stale-signal fill: R:R {rr_ratio:.2f} < {min_rr} after "
+                        f"{slippage/pv:+.1f} pip slippage"
+                    )
+                if take_profit != signal.take_profit and not occult_stops:
+                    try:
+                        oanda.modify_trade_tp(trade_id, take_profit, pair)
+                    except Exception as exc:
+                        log.warning("%s  TP update after fill-slippage failed: %s", pair.upper(), exc)
         except Exception as exc:
             log.error("%s  OANDA order failed — will retry next poll: %s", pair.upper(), exc)
             return state
@@ -975,7 +1001,7 @@ def _open_automated(
         trade_type   = "automated",
         entry_price  = entry_price,
         stop_loss    = stop_loss,
-        take_profit  = signal.take_profit,
+        take_profit  = take_profit,
         atr          = signal.atr,
         risk_pips    = risk_pips,
         reward_pips  = reward_pips,
@@ -985,7 +1011,7 @@ def _open_automated(
         trade_id     = trade_id,
         occult_stops = occult_stops,
         signal_price = signal.entry_price,
-        original_tp  = signal.take_profit,
+        original_tp  = take_profit,
         best_price   = entry_price,
     )
     state.position = pos

@@ -129,7 +129,7 @@ M5_EMA_SLOW      = 21
 M5_RSI_PERIOD    = 7
 M5_STOCH_PERIOD  = 14
 M5_STOCH_SMOOTH  = 3
-M5_ATR_MIN       = 0.0002   # 2 pips — don't scalp a dead market
+M5_ATR_MIN       = 0.02     # 2 pips (JPY: pip=0.01, so 2 pips = 0.02) — don't scalp a dead market
 
 # Risk — tight scalper targets
 ATR_PERIOD        = 14
