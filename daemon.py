@@ -1548,10 +1548,14 @@ def _start_control_server(
     log.info("Control server on port %d", CONTROL_PORT)
 
     def _handle(conn: "_socket.socket") -> None:
+        conn.settimeout(300.0)  # close idle/half-open connections after 5 minutes
         conn.sendall(b"FX Trader v2  |  help=commands  quit=disconnect\r\n\r\n> ")
         f = conn.makefile("rb")
         while True:
-            raw = f.readline(256)
+            try:
+                raw = f.readline(256)
+            except _socket.timeout:
+                break
             if not raw:
                 break
             cmd = bytes(b for b in raw if 32 <= b < 127).decode().strip()
