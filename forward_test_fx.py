@@ -21,8 +21,7 @@ from rich import box
 from rich.console import Console
 from rich.table import Table
 
-PAIR_ORDER = ["eurusd", "gbpusd", "usdjpy", "audusd", "btcusd"]
-BTC_PAIRS  = {"btcusd"}
+PAIR_ORDER = ["eurusd", "gbpusd", "usdjpy", "audusd", "eurjpy"]
 
 console = Console()
 
@@ -100,7 +99,7 @@ def print_table(title: str, by_pair: dict[str, list[dict]]) -> None:
 
     for pair in pairs_seen:
         s       = compute_stats(by_pair[pair])
-        unit    = "USD" if pair in BTC_PAIRS else "pips"
+        unit    = "pips"
         pf_str  = f"{s['pf']:.2f}" if s["pf"] != float("inf") else "∞"
         pip_col = "green" if s["total"] > 0 else "red"
         table.add_row(

@@ -1,5 +1,5 @@
 """
-Logging configuration for the FX / crypto trader daemons.
+Logging configuration for the FX trader daemon.
 
 Each daemon calls configure() once at startup.  After that, every module
 using logging.getLogger("<name>.*") writes to both the console and a
@@ -25,6 +25,7 @@ LOG_BACKUP_COUNT : number of rotated files to keep (default 5)
 
 import logging
 import os
+import shutil
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -41,8 +42,8 @@ def configure(name: str, log_file: Path | None = None, level: str | None = None)
     Attach console + rotating file handlers to the logger called ``name``.
 
     Args:
-        name:     Root logger name, e.g. "fxtrader" or "cryptotrader".
-                  All child loggers (name.daemon, name.tradelog, …) inherit
+        name:     Root logger name, e.g. "fxtrader".
+                  All child loggers (name.daemon, …) inherit
                   these handlers automatically.
         log_file: Path to the log file.  Defaults to ``<name>.log`` in the
                   current working directory.
@@ -76,6 +77,12 @@ def configure(name: str, log_file: Path | None = None, level: str | None = None)
         backupCount=_LOG_BACKUP_COUNT,
         encoding="utf-8",
     )
+    # Docker bind-mounts reject os.rename() with EBUSY; use copy+truncate instead.
+    def _docker_rotator(source: str, dest: str) -> None:
+        shutil.copy2(source, dest)
+        open(source, "w").close()  # noqa: WPS515 — truncate in place
+
+    fh.rotator = _docker_rotator
     fh.setLevel(logging.DEBUG)   # file always captures everything
     fh.setFormatter(fmt)
     logger.addHandler(fh)

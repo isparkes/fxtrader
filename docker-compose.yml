@@ -7,7 +7,6 @@ services:
       - "127.0.0.1:9876:9876"   # control console — localhost only
     volumes:
       - /Users/iansparkes/Data/Projects/fxtrader/fx_trades.jsonl:/app/fx_trades.jsonl
-      - /Users/iansparkes/Data/Projects/fxtrader/trades.jsonl:/app/trades.jsonl
       - /Users/iansparkes/Data/Projects/fxtrader/fxtrader.log:/app/fxtrader.log
       - /Users/iansparkes/Data/Projects/fxtrader/data/oanda:/app/data/oanda   # persistent OANDA parquet store
     # Override CMD to pass flags, e.g.:

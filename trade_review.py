@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Analyses fx_trades.jsonl and crypto_trades.jsonl, producing backtest-style
-performance tables: overall (per pair), monthly, weekly, daily, by regime,
-and by pattern.
+Analyses fx_trades.jsonl, producing backtest-style performance tables:
+overall (per pair), monthly, weekly, daily, by regime, and by pattern.
 
 Usage:
     python trade_review.py
-    python trade_review.py --fx path/to/fx_trades.jsonl --crypto path/to/crypto_trades.jsonl
+    python trade_review.py --fx path/to/fx_trades.jsonl
 """
 
 import json
@@ -24,8 +23,7 @@ from rich import box
 BASE = Path(__file__).parent
 console = Console()
 
-FX_PAIRS = {"eurusd", "usdjpy", "audusd", "gbpusd"}
-PAIR_ORDER = ["eurusd", "usdjpy", "audusd", "gbpusd", "btcusd"]
+PAIR_ORDER = ["eurusd", "usdjpy", "audusd", "gbpusd", "eurjpy"]
 
 _PAT_ORDER = ["A — EMA cross", "C — MACD flip", "D — HA pullback", "E — Supertrend", "?"]
 _PAT_KWS = [
@@ -50,7 +48,6 @@ class Trade:
     opened_ts: datetime
     closed_ts: datetime
     hold_mins: float
-    unit: str         # pips | USD
     rr: float
 
 
@@ -105,7 +102,6 @@ def load(path: Path) -> list[Trade]:
                     opened_ts=opened,
                     closed_ts=closed,
                     hold_mins=(closed - opened).total_seconds() / 60,
-                    unit="USD" if ev["pair"] == "btcusd" else "pips",
                     rr=op.get("rr", 0.0),
                 ))
     return result
@@ -229,15 +225,11 @@ def _full_table(
 # ─── Period table (day / week / month) ───────────────────────────────────────
 
 def _period_row(label: str, ts: list[Trade]) -> list[str]:
-    fx  = [t for t in ts if t.unit == "pips"]
-    btc = [t for t in ts if t.unit == "USD"]
-    fs, bs = calc(fx), calc(btc)
+    s = calc(ts)
     return [
         label,
-        _v(fs, "n",     str), _v(fs, "wr", pct), _v(fs, "pf", _pf),
-        _v(fs, "total", pm),  _v(fs, "dd", dds),
-        _v(bs, "n",     str), _v(bs, "wr", pct), _v(bs, "pf", _pf),
-        _v(bs, "total", pm),  _v(bs, "dd", dds),
+        _v(s, "n",     str), _v(s, "wr", pct), _v(s, "pf", _pf),
+        _v(s, "total", pm),  _v(s, "dd", dds),
     ]
 
 
@@ -246,9 +238,7 @@ def _period_table(title: str, rows: list[list[str]]) -> Table:
               title_style="bold", header_style="bold cyan",
               show_footer=False, padding=(0, 1))
     t.add_column("Period", style="bold", no_wrap=True)
-    for col in ("FX Trades", "FX Win%", "FX PF", "FX Pips", "FX Max DD"):
-        t.add_column(col, justify="right")
-    for col in ("BTC Trades", "BTC Win%", "BTC PF", "BTC USD", "BTC Max DD"):
+    for col in ("Trades", "Win%", "PF", "Pips", "Max DD"):
         t.add_column(col, justify="right")
     for row in rows:
         t.add_row(*row)
@@ -259,19 +249,12 @@ def _period_table(title: str, rows: list[list[str]]) -> Table:
 
 def print_overall(trades: list[Trade]) -> None:
     rows: list[tuple] = []
-    fx_all: list[Trade] = []
     for p in PAIR_ORDER:
-        if p not in FX_PAIRS:
-            continue
         pt = [t for t in trades if t.pair == p]
         if pt:
             rows.append((p.upper(), pt, "pips"))
-            fx_all.extend(pt)
-    if fx_all:
-        rows.append(("── FX total ──", fx_all, "pips"))
-    btc = [t for t in trades if t.pair == "btcusd"]
-    if btc:
-        rows.append(("BTCUSD", btc, "USD"))
+    if len(rows) > 1:
+        rows.append(("── total ──", trades, "pips"))
     console.print(_full_table("Overall Performance", rows))
 
 
@@ -304,18 +287,14 @@ def print_daily(trades: list[Trade]) -> None:
 
 
 def print_regime(trades: list[Trade]) -> None:
-    for label, subset, unit in [
-        ("FX pairs", [t for t in trades if t.unit == "pips"], "pips"),
-        ("BTCUSD",   [t for t in trades if t.unit == "USD"],  "USD"),
-    ]:
-        if not subset:
-            continue
-        rows = [
-            (regime, [t for t in subset if t.regime == regime], unit)
-            for regime in ("TREND_UP", "TREND_DOWN", "?")
-            if any(t.regime == regime for t in subset)
-        ]
-        console.print(_full_table(f"By Regime — {label} ({unit})", rows, show_hold=False))
+    if not trades:
+        return
+    rows = [
+        (regime, [t for t in trades if t.regime == regime], "pips")
+        for regime in ("TREND_UP", "TREND_DOWN", "?")
+        if any(t.regime == regime for t in trades)
+    ]
+    console.print(_full_table("By Regime (pips)", rows, show_hold=False))
 
 
 def print_pattern(trades: list[Trade]) -> None:
@@ -332,8 +311,8 @@ def print_pattern(trades: list[Trade]) -> None:
 
 # ─── Open positions notice ────────────────────────────────────────────────────
 
-def report_open(fx_path: Path, crypto_path: Path) -> None:
-    open_pos = find_open_positions(fx_path) + find_open_positions(crypto_path)
+def report_open(fx_path: Path) -> None:
+    open_pos = find_open_positions(fx_path)
     if open_pos:
         console.print(
             f"[yellow]  {len(open_pos)} position(s) still open "
@@ -349,16 +328,13 @@ def report_open(fx_path: Path, crypto_path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyse live trade logs.")
-    parser.add_argument("--fx",     default=str(BASE / "fx_trades.jsonl"),
+    parser.add_argument("--fx", default=str(BASE / "fx_trades.jsonl"),
                         help="Path to fx_trades.jsonl (default: %(default)s)")
-    parser.add_argument("--crypto", default=str(BASE / "crypto_trades.jsonl"),
-                        help="Path to crypto_trades.jsonl (default: %(default)s)")
     args = parser.parse_args()
 
-    fx_path     = Path(args.fx)
-    crypto_path = Path(args.crypto)
+    fx_path = Path(args.fx)
 
-    trades = load(fx_path) + load(crypto_path)
+    trades = load(fx_path)
     trades.sort(key=lambda t: t.closed_ts)
 
     if not trades:
@@ -367,17 +343,12 @@ def main() -> None:
 
     ts_start = trades[0].closed_ts.strftime("%Y-%m-%d")
     ts_end   = trades[-1].closed_ts.strftime("%Y-%m-%d")
-    n_fx  = sum(1 for t in trades if t.unit == "pips")
-    n_btc = sum(1 for t in trades if t.unit == "USD")
 
     console.print()
     console.rule("[bold]Live Trade Analysis[/bold]")
-    console.print(
-        f"  {ts_start} → {ts_end}  ·  "
-        f"{n_fx} FX trades  ·  {n_btc} BTC trades\n"
-    )
+    console.print(f"  {ts_start} → {ts_end}  ·  {len(trades)} trades\n")
 
-    report_open(fx_path, crypto_path)
+    report_open(fx_path)
     print_overall(trades)
     print_monthly(trades)
     print_weekly(trades)

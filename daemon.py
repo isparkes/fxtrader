@@ -90,7 +90,6 @@ import datalib
 import logsetup
 import tradelib
 from mailer import send_email
-import tradelog
 
 load_dotenv()
 
@@ -1029,12 +1028,6 @@ def _open_automated(
     else:
         send_email(subj, body)
 
-    # Also log to the tradelog module (legacy compatibility)
-    try:
-        tradelog.log_open(pos)
-    except Exception:
-        pass
-
     return state
 
 
@@ -1654,25 +1647,6 @@ def daemon_loop(
     for pair, pips in saved["month_pips"].items():
         if pair in states:
             states[pair].month_pips = pips
-
-    # Also restore from tradelog (legacy automated positions)
-    try:
-        legacy = tradelog.load_state()
-        for symbol, data in legacy.items():
-            pair_key = symbol.lower().replace("-", "")
-            if pair_key in states and states[pair_key].position is None:
-                pos_data = data.get("position")
-                if pos_data:
-                    known = tradelib.Position.__dataclass_fields__.keys()
-                    pos_data.setdefault("trade_type", "automated")
-                    pos = tradelib.Position(**{k: v for k, v in pos_data.items() if k in known})
-                    pos.occult_stops = occult_stops
-                    states[pair_key].position = pos
-                    log.info("  Restored from tradelog: %s %s @ %.5f",
-                             pair_key.upper(), pos.direction, pos.entry_price)
-                    auto_count += 1
-    except Exception as exc:
-        log.debug("tradelog restore failed: %s", exc)
 
     if auto_count + disc_count == 0:
         log.info("Startup [2/4] — no open positions to restore")

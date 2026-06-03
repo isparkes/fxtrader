@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY daemon.py tradelib.py datalib.py oanda.py \
      indicator_*.py \
-     logsetup.py mailer.py tradelog.py ./
+     logsetup.py mailer.py ./
 
 # fx_trades.jsonl (daemon state) and fxtrader.log are written at runtime —
 # mount volumes for persistence across container restarts.
