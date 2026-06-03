@@ -1248,3 +1248,32 @@ Live closed PnL: −15.7 pips (4 closed, 1 open at time of snapshot).
 - **May 26–28 was a RANGE-like period** for USDJPY (25% WR, choppy JPY). The early-week indicator (per regime/RR analysis): by end of Tuesday May 26 the TP rate was 0% across the roster — a RANGE warning. Week closed at 33% WR which matches the RANGE classification threshold. Consistent with prior regime analysis findings.
 
 ---
+
+## Forward Test Review — 2026-06-03 (W23)
+
+**Second consecutive poor week for USDJPY — monitoring, no action yet.**
+
+The W22 snapshot note said: "Monitor W22 — if another poor week follows and PF approaches 2.0, that would be the first structural concern." W23 (May 28 – Jun 3) is that second poor week.
+
+### Forward test results (fx_trades.jsonl, May 28 – Jun 3)
+
+| Pair   | Trades | Win% | PF   | Total   | Notes |
+|--------|--------|------|------|---------|-------|
+| EURUSD |      6 | 50%  | 1.35 | +12.4 p | Includes 1 ghost close (−12p) and 1 probable double-counted close |
+| USDJPY |     10 | 10%  | 0.10 | −66.3 p | Includes 2 ghost closes (−24p) and 3 sub-RR trades |
+
+**Known data quality issues in this sample** (see diagnostic notes below — these inflate the reported losses):
+
+1. **Ghost closes (daemon restart bug):** Trades 751/767/838 each appear in the log twice — once with the original trade_id and once with `trade_id: null` a few hours later, after a daemon restart replayed the JSONL and re-closed already-closed positions. Removes −36 pips of artificial losses from the totals.
+2. **Sub-RR trades slipped through `HA_MIN_RR=1.5`:** Trades 821 (R:R 0.07), 829 (R:R 0.64), 838 (R:R 0.55) traded with very low ATR at signal time, producing tiny TPs. After fill slippage clamped SL to 12 pips, the post-fill RR check did not close them as expected.
+3. **EURUSD 805 double-count:** Close event at Jun 1 (+8.9p, trade_id 805) and a second close at Jun 3 (+23.8p, trade_id null) for the same 1.16416 SELL entry — one is likely a false local-state close with the OANDA trade remaining open.
+
+Correcting for ghost closes only: USDJPY −42.3 p over 8 real trades / 12.5% WR. Still poor, but the primary driver is market regime, not bookkeeping.
+
+### USDJPY regime assessment
+
+USDJPY traded in a 159.0–160.0 band throughout W22–W23. Patterns D (HA pullback) and E (Supertrend flip) both suffered sequential SL hits as price oscillated within the range. The pair is exempt from the daily ADX gate (`DAILY_ADX_MIN = 0`), relying on Supertrend/HA self-selection to avoid ranging conditions — which is proving insufficient.
+
+**Decision: monitor one more week (W24, Jun 2–6).** No parameter or gate changes yet. If USDJPY continues with <25% WR or PF <2.0 in the next backtest snapshot, evaluate adding an ADX floor (candidate threshold: ADX(14) ≥ 15 on daily bars, consistent with the values applied to EURUSD/AUDUSD).
+
+---
