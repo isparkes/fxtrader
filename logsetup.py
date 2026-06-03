@@ -29,7 +29,6 @@ import shutil
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-_LOG_LEVEL        = os.getenv("LOG_LEVEL",        "INFO").upper()
 _LOG_MAX_BYTES    = int(os.getenv("LOG_MAX_BYTES",    str(5 * 1024 * 1024)))
 _LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "5"))
 
@@ -57,7 +56,7 @@ def configure(name: str, log_file: Path | None = None, level: str | None = None)
     if logger.handlers:
         return  # already configured; avoid duplicate handlers on restart/reload
 
-    console_level = logging.getLevelName(level or _LOG_LEVEL)
+    console_level = logging.getLevelName(level or os.getenv("LOG_LEVEL", "INFO").upper())
     logger.setLevel(logging.DEBUG)   # logger itself passes everything; handlers filter
     logger.propagate = False         # don't bubble up to the root Python logger
 
