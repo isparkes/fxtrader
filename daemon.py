@@ -122,6 +122,7 @@ CONTROL_PORT       = int(os.getenv("FX_CTRL_PORT", "9876"))
 COOLDOWN_MINS       = 60
 WEEKEND_CLOSE_HOUR  = 20
 POLL_INTERVAL_SECS  = 60    # fixed 1-minute poll — matches M1 bar cadence
+SIGNAL_MAX_AGE_MINS = 15    # discard M5 signal bars older than this (3 bars)
 
 H1_MAX_BARS = 300
 M5_MAX_BARS = 600
@@ -307,7 +308,7 @@ def refresh_data(pair: str, state: PairState) -> PairState:
 
 # ── Spread guard ──────────────────────────────────────────────────────────────
 
-def _spread_ok(pair: str) -> tuple[bool, float]:
+def _spread_ok(pair: str) -> tuple[bool, float, dict]:
     try:
         price       = oanda.get_price(pair)
         pv          = PAIR_INDICATORS[pair].pip_value(pair)
@@ -316,10 +317,18 @@ def _spread_ok(pair: str) -> tuple[bool, float]:
         ok          = spread_pips <= threshold
         log.debug("%s  spread %.1f pips (limit %.1f) — %s",
                   pair.upper(), spread_pips, threshold, "OK" if ok else "BLOCKED")
-        return ok, spread_pips
+        return ok, spread_pips, price
     except Exception as exc:
         log.error("%s  spread check failed (%s) — blocking entry", pair.upper(), exc)
-        return False, 0.0
+        return False, 0.0, {}
+
+
+def _tp_reachable(signal: tradelib.Signal, price: dict) -> bool:
+    """Return False if the current market has already moved past the TP level."""
+    if signal.direction == "BUY":
+        return price.get("ask", 0) < signal.take_profit
+    else:
+        return price.get("bid", float("inf")) > signal.take_profit
 
 
 # ── Position sizing ───────────────────────────────────────────────────────────
@@ -564,10 +573,11 @@ def _email_close(pos: tradelib.Position, event: str, exit_price: float) -> tuple
     ) / pv
     result = "WIN" if pnl > 0 else "LOSS"
     reasons = {
-        "close_tp":      "Take Profit",
-        "close_sl":      "Stop Loss",
-        "close_weekend": "Weekend Close (pre-market)",
-        "close_manual":  "Manual Close (console)",
+        "close_tp":         "Take Profit",
+        "close_sl":         "Stop Loss",
+        "close_weekend":    "Weekend Close (pre-market)",
+        "close_manual":     "Manual Close (console)",
+        "close_undetected": "Externally Closed (recovered)",
     }
     sign = "+" if pnl >= 0 else ""
     subj = f"{result} — {tag} [{pos.pair.upper()}] {pos.direction} Closed {sign}{pnl:.1f} pips"
@@ -888,21 +898,43 @@ def tick(
             if bias_info["direction"] != "FLAT":
                 entry = ind.find_m5_entry(df_5m, bias_info["direction"])
                 if entry and entry["bar_time"] != state.last_signal_bar:
-                    signal = ind.build_signal(bias_info, entry, pair.upper(), spread_pips=STANDARD_SPREADS[pair])
-
-                    if signal.direction != "FLAT" and _tp_sane(signal):
-                        spread_ok, _ = _spread_ok(pair)
-                        if spread_ok:
-                            state = _open_automated(
-                                pair, signal, state, dry_run, live, occult_stops
-                            )
-                            if state.position is not None:
+                    try:
+                        bar_dt = pd.Timestamp(entry["bar_time"]).tz_localize("UTC") \
+                            if pd.Timestamp(entry["bar_time"]).tzinfo is None \
+                            else pd.Timestamp(entry["bar_time"])
+                        bar_age_mins = (now - bar_dt.to_pydatetime()).total_seconds() / 60
+                    except Exception:
+                        bar_age_mins = 0
+                    if bar_age_mins > SIGNAL_MAX_AGE_MINS:
+                        log.debug(
+                            "%s  signal bar %s is %.0f min old (max %d) — skipping",
+                            pair.upper(), entry["bar_time"], bar_age_mins, SIGNAL_MAX_AGE_MINS,
+                        )
+                        state.last_signal_bar = entry["bar_time"]
+                    else:
+                        signal = ind.build_signal(bias_info, entry, pair.upper(), spread_pips=STANDARD_SPREADS[pair])
+                        if signal.direction != "FLAT" and _tp_sane(signal):
+                            spread_ok, _, live_price = _spread_ok(pair)
+                            if spread_ok:
+                                if not _tp_reachable(signal, live_price):
+                                    log.warning(
+                                        "%s  TP %.5f already past market "
+                                        "(bid=%.5f ask=%.5f) — holding for reversion",
+                                        pair.upper(), signal.take_profit,
+                                        live_price.get("bid", 0),
+                                        live_price.get("ask", 0),
+                                    )
+                                else:
+                                    state = _open_automated(
+                                        pair, signal, state, dry_run, live, occult_stops
+                                    )
+                                    if state.position is not None:
+                                        state.last_signal_bar = entry["bar_time"]
+                            else:
+                                log.info("%s  signal skipped — spread too wide", pair.upper())
                                 state.last_signal_bar = entry["bar_time"]
                         else:
-                            log.info("%s  signal skipped — spread too wide", pair.upper())
                             state.last_signal_bar = entry["bar_time"]
-                    else:
-                        state.last_signal_bar = entry["bar_time"]
 
     # ── Discretionary position management ───────────────────────────────────
     for tid, pos in list(managed.items()):
@@ -1801,10 +1833,39 @@ def daemon_loop(
                     _close_all(pairs, states, managed, live, dry_run, reason="close_weekend")
                 weekend_close_done = iso_week
 
-        # ── Live: prune discretionary trades no longer open on OANDA ─────────
-        if live and managed:
+        # ── Live: prune positions no longer open on OANDA ────────────────────
+        _any_auto = any(
+            states[p].position and states[p].position.trade_id for p in pairs
+        )
+        if live and (managed or _any_auto):
             try:
                 open_ids = {str(t["id"]) for t in oanda.get_open_trades()}
+                # Automated positions — recover actual close from OANDA if gone
+                for p in pairs:
+                    pos = states[p].position
+                    if not (pos and pos.trade_id and str(pos.trade_id) not in open_ids):
+                        continue
+                    log.warning(
+                        "%s  automated trade %s not on OANDA — recovering close",
+                        p.upper(), pos.trade_id,
+                    )
+                    exit_price = pos.entry_price
+                    try:
+                        td = oanda.get_trade(str(pos.trade_id))
+                        ep = td.get("averageClosePrice")
+                        if ep:
+                            exit_price = float(ep)
+                    except Exception as exc2:
+                        log.warning("%s  could not fetch closed trade data: %s", p.upper(), exc2)
+                    pv  = PAIR_INDICATORS[p].pip_value(p)
+                    pnl = round(
+                        ((exit_price - pos.entry_price) if pos.direction == "BUY"
+                         else (pos.entry_price - exit_price)) / pv,
+                        1,
+                    )
+                    _log_close(pos, "close_undetected", exit_price, pnl)
+                    states[p].position = None
+                # Discretionary positions
                 for tid in list(managed.keys()):
                     if tid not in open_ids:
                         pos = managed.pop(tid)

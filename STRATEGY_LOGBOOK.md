@@ -1277,3 +1277,52 @@ USDJPY traded in a 159.0–160.0 band throughout W22–W23. Patterns D (HA pullb
 **Decision: monitor one more week (W24, Jun 2–6).** No parameter or gate changes yet. If USDJPY continues with <25% WR or PF <2.0 in the next backtest snapshot, evaluate adding an ADX floor (candidate threshold: ADX(14) ≥ 15 on daily bars, consistent with the values applied to EURUSD/AUDUSD).
 
 ---
+
+## Snapshot — 2026-06-04
+
+**Period:** scalp = 90d ending 2026-06-04 (parquet store current as of Jun 4)
+**Changes since last snapshot:** None. Routine mid-week snapshot to capture W22–W23 absorption and check USDJPY PF trajectory per prior decision.
+
+### Scalp mode — 90d · 5m bars
+
+90d net-change: EURUSD −0.1% (FLAT) · USDJPY +1.6% (FLAT) · AUDUSD +1.7% (FLAT) · EURJPY +1.5% (FLAT)
+
+| Pair   | Market Regime | Trades | Win%  | Avg W   | Avg L   |  PF  | Expec      | Total      | Max DD      |
+|--------|---------------|--------|-------|---------|---------|------|------------|------------|-------------|
+| EURUSD | FLAT          |     58 | 51.7% |  29.7 p |  11.1 p | 2.86 |  10.0 p/tr |    579.8 p |    −44.0 p  |
+| USDJPY | FLAT          |     47 | 34.0% |  45.6 p |  10.2 p | 2.32 |   8.8 p/tr |    415.4 p |    −55.6 p  |
+| AUDUSD | FLAT          |     27 | 48.1% |  36.3 p |  11.7 p | 2.88 |  11.4 p/tr |    307.6 p |    −46.0 p  |
+| EURJPY | FLAT          |     30 | 30.0% |  42.4 p |  12.5 p | 1.46 |   4.0 p/tr |    119.7 p |    −84.0 p  |
+
+(p = pips · tr = trade · USDJPY: Patterns D+E, ADX exempt; EURUSD/AUDUSD: A+C+D; EURJPY: A+C+D+E · EURJPY candidate only, not yet in live rotation · GBPUSD not run)
+
+### vs. prior snapshot (2026-05-29)
+
+| Pair   | PF before | PF after | Trades Δ | Total pips Δ | Max DD Δ  | Notes |
+|--------|-----------|----------|----------|--------------|-----------|-------|
+| EURUSD | 2.97      | **2.86** | +1       | −11.0        | stable    | EURUSD backtest fired 0 W23 signals; live took 2 — signal divergence persisting |
+| USDJPY | 2.41      | **2.32** | +3       | −1.6         | −52→−56   | Third consecutive losing/flat week; PF below 2.5 for first time since May |
+| AUDUSD | 2.79      | **2.88** | +1       | +14.9        | stable    | Added 1 trade, slight improvement |
+| EURJPY | 1.68      | **1.46** | +5       | −24.8        | stable    | Worst W23 of all pairs in backtest (5 trades, 20% WR) |
+
+### W23 backtest breakdown (Jun 1–4, in-progress)
+
+| Pair   | BT Trades | BT WR | BT PF | BT pips | Live trades | Live WR | Live pips | Live vs BT |
+|--------|-----------|-------|-------|---------|-------------|---------|-----------|------------|
+| EURUSD | 0         | —     | —     | —       | 2           | 50%     | −2.5 p    | BT silent; live active |
+| USDJPY | 3         | 33%   | 0.91  | −1.6 p  | 6           | 17%     | −20.4 p   | Live 3× more trades, deeper loss |
+| AUDUSD | 1         | 0%    | 0.00  | −11.5 p | 0           | —       | —         | BT fired; live quiet |
+| EURJPY | 5         | 20%   | 0.48  | −24.8 p | —           | —       | —         | Not live |
+
+Live combined W23: 8 real automated closes, 25% WR, −22.9 pips. Two null-ID ghost closes logged on Wed Jun 03 07:13–07:35 UTC (daemon restart artifact, confirmed not real P&L — entry prices match already-closed trades 805 and 838).
+
+### Notes
+
+- **USDJPY PF 2.32 — third consecutive below-par period.** W22 (backtest −54.0p, 0% WR), W23 (backtest −1.6p, 33% WR). The May 29 W23 decision trigger was "PF <2.0 or <25% WR" — current PF 2.32 has not yet reached that level, but trajectory is downward (3.17 → 2.94 → 2.84 → 2.41 → 2.32 over six snapshots). USDJPY continues to trade in the 159.0–160.0 range; D+E patterns are firing into choppy conditions that lack follow-through. **Decision: begin evaluating the ADX floor** — run a sweep of `DAILY_ADX_MIN` values (12, 15, 18) for USDJPY to quantify the trade-off before the next snapshot.
+- **EURUSD signal divergence on W23.** Backtest generated zero EURUSD signals while live took 2 trades this week. This is a recurrence of the divergence documented in the May 21 analysis. EURUSD backtest data ends at W22 (last entry May 28) — the parquet update brought data forward but the indicator's ADX gate may be producing different results on the backtest window vs. live. The two live EURUSD trades (−11.4p BUY, +8.9p SELL) were directionally correct for the regime; the backtest missing them is not necessarily a strategy concern, but it undermines confidence in the backtest as a live signal proxy for EURUSD.
+- **AUDUSD quietly improving.** PF 2.88 with a max DD of only −46.0p is the best risk-adjusted result in the active set this snapshot. One new W23 trade added (a loss, −11.5p) but the rolling window dropped older losers, lifting PF. ADX gate continues to limit trade frequency correctly.
+- **EURJPY degraded most this week.** W23 was its worst week in the backtest sample (5 trades, 20% WR, −24.8p). PF fell from 1.68 → 1.46, now approaching the marginal zone. Consistent with the broader range environment. No change to the watch/defer stance — still a candidate for GBPUSD replacement, not yet activated.
+- **W22+W23 combined are a rough patch for the entire portfolio.** USDJPY −55.6p (W22) + −1.6p (W23) = −57.2p over two weeks. EURUSD −16.3p (W22) + 0p (W23, BT silent) also soft. This is the deepest two-week drawdown in the backtest window since W17 (2026-04-21, −96p combined). All pairs remain FLAT macro regime — not a trend reversal, likely a consolidation phase.
+- **Daemon restart ghost events (Jun 03, 07:13 UTC)** produced two null-ID close events in fx_trades.jsonl that match already-closed trades. The daemon lost state on restart and re-closed phantom positions. No real P&L impact confirmed (OANDA trade IDs do not match any live open). Root cause: the JSONL replay path does not correctly verify whether a trade_id is still open on OANDA before issuing a close. Should be investigated before the next high-volatility period.
+
+---

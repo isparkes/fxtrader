@@ -234,6 +234,17 @@ def close_trade(trade_id: str) -> dict:
     return resp.json()
 
 
+# ── Trade lookup ─────────────────────────────────────────────────────────────
+
+def get_trade(trade_id: str) -> dict:
+    """Fetch a single trade (open or closed) by its OANDA trade ID."""
+    _require_config()
+    url = f"{_BASE_URL}/v3/accounts/{_ACCOUNT_ID}/trades/{trade_id}"
+    resp = requests.get(url, headers=_headers(), timeout=10)
+    resp.raise_for_status()
+    return resp.json()["trade"]
+
+
 # ── Open trades ───────────────────────────────────────────────────────────────
 
 def get_open_trades() -> list[dict]:
