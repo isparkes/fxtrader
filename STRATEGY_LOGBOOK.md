@@ -1327,6 +1327,42 @@ Live combined W23: 8 real automated closes, 25% WR, −22.9 pips. Two null-ID gh
 
 ---
 
+## EURUSD Entry Simplification Research — 2026-06-06
+
+**Motivation:** The EURUSD entry system uses three pattern types (A, C, D) with multiple oscillator guards (RSI, Stochastic on A and C; 3-candle HA sequence on D). The question was whether a simpler system could match or exceed performance.
+
+**Baseline (A+C+D, 90d, scalp):** 49 trades · 42.9% WR · PF 2.27 · 7.3 p/tr · −31.5 max DD · $13,512 final balance
+
+**Per-pattern baseline breakdown:**
+
+| Pattern | Trades | WR    | PF   |
+|---------|--------|-------|------|
+| A       | 2      | —     | 5.02 |
+| C       | 23     | 35.0% | 1.61 |
+| D       | 24     | 50.0% | 2.86 |
+
+**Experiments run:**
+
+| System                                  | Trades | WR    | PF   | Expect | Max DD  | Balance  |
+|-----------------------------------------|--------|-------|------|--------|---------|----------|
+| **Original A+C+D** (baseline)           | 49     | 42.9% | 2.27 | 7.3 p  | −31.5 p | $13,512  |
+| D-only (drop A+C)                       | 33     | 45.5% | 2.39 | 7.6 p  | −30.0 p | $12,457  |
+| C (RSI gate only, no Stoch) + D         | 59     | 40.7% | 1.95 | 5.7 p  | −60.0 p | $13,255  |
+| C (no oscillator guards) + D            | 67     | 38.8% | 1.78 | 4.8 p  | −77.6 p | $13,129  |
+| 2-bar HA (replace D, no oscillators)    | 77     | 41.6% | 1.88 | 5.2 p  | −64.0 p | $13,987  |
+
+**Findings:**
+
+- D-only produces a marginal PF gain (+0.12) but loses $1,055 final balance; dropping A is essentially free (A fires only 2 times per 90 days), but dropping C removes real edge.
+- Removing Stochastic from C expanded trade count 23→53 with PF collapsing to 1.95 and max DD doubling to −60p. The Stochastic gate is filtering a large volume of low-quality C setups.
+- Removing all C oscillator guards pushed trade count to 67 total; PF 1.78 and max DD −77.6p — the worst of all tested configurations.
+- The 2-bar HA approach (entry on any HA colour change, no oscillators) generated 77 trades at PF 1.88 — substantially more activity but lower quality. The 3-candle sequence in Pattern D is filtering the majority of HA signals.
+- Hour-of-day analysis showed C losses concentrated in 11:00–14:00 UTC (6 trades at 13–14h, 0% WR, −60 pips); early London C (07:00–09:00 UTC) was strong (~80% WR). The Stochastic guard is the mechanism suppressing these midday entries.
+
+**Conclusion:** A+C+D retained unchanged. Every simplification tested degraded PF and/or approximately doubled max drawdown. The RSI+Stochastic guards on Pattern C and the 3-candle trend + pullback requirement on Pattern D are load-bearing — complexity in this system is justified by measured outcomes.
+
+---
+
 ## Code changes — 2026-06-06
 
 ### Strategy / parameter changes

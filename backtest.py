@@ -30,12 +30,11 @@ Usage
     python backtest.py --all           # all active pairs, scalp mode
     python backtest.py --all --long    # all active pairs, long mode
     python backtest.py --seed          # seed data then run
-    python backtest.py --by-week       # split results per trading week
     python backtest.py --by-day        # split results per trading day (Mon–Fri)
 """
 
 import argparse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 import pandas as pd
@@ -821,13 +820,14 @@ def report_weekly_pnl(
     df["_size"]  = sizes
 
     all_weeks = sorted(df["_week"].unique())
-    if len(all_weeks) < 3:
-        return                          # not enough weeks to identify complete ones
-    complete_weeks = all_weeks[1:-1]    # drop first and last (potentially partial)
+    if len(all_weeks) < 1:
+        return
+    partial = {all_weeks[0], all_weeks[-1]} if len(all_weeks) > 1 else set()
 
     mode = "long" if bar_mins >= 60 else "scalp"
+    current_week = date.today().isocalendar().week
     table = Table(
-        title=f"Weekly P&L (complete weeks) — {pair_label}  ({mode})",
+        title=f"Weekly P&L W{current_week:02d} — {pair_label}  ({mode})",
         box=box.ROUNDED,
     )
     table.add_column("Week",     style="dim")
@@ -845,7 +845,7 @@ def report_weekly_pnl(
     )
     df["_pnl_usd"] = df["pnl_pips"] * df["_pv"] * df["_size"]
 
-    for week in complete_weeks:
+    for week in all_weeks:
         grp        = df[df["_week"] == week]
         week_pips  = grp["pnl_pips"].sum()
         week_usd   = grp["_pnl_usd"].sum()
@@ -853,8 +853,9 @@ def report_weekly_pnl(
         total_pips += week_pips
         c = "green" if week_pips >= 0 else "red"
         bal_c = "green" if balance >= account else "red"
+        week_label = f"{week} *" if week in partial else week
         table.add_row(
-            week,
+            week_label,
             str(len(grp)),
             f"[{c}]{week_pips:+.1f}[/]",
             f"[{bal_c}]${balance:,.2f}[/]",
@@ -864,25 +865,100 @@ def report_weekly_pnl(
     c = "green" if total_pips >= 0 else "red"
     bal_c = "green" if balance >= account else "red"
     table.add_row(
-        f"Total ({len(complete_weeks)} weeks)",
+        f"Total ({len(all_weeks)} weeks)",
         "",
         f"[{c}]{total_pips:+.1f}[/]",
         f"[{bal_c}]${balance:,.2f}[/]",
     )
+    if partial:
+        console.print("  [dim]* partial week (backtest boundary)[/]")
 
     console.print(table)
 
 
-def report_by_week(trades: list[dict], pair_label: str, bar_mins: int) -> None:
-    """Print a per-ISO-week breakdown table."""
+def report_by_week(
+    trades: list[dict],
+    pair_label: str,
+    bar_mins: int,
+    account: float = 10_000,
+    risk_pct: float = 1.0,
+) -> None:
+    """Print a per-ISO-week breakdown table with partial-week markers, pip total, and running balance."""
     if not trades:
         return
+
+    sizes, _ = _compute_sizing(trades, pair_label, account, risk_pct)
+    LOT_SIZE  = 100_000
+    is_jpy    = "jpy" in pair_label.lower()
+
     df = pd.DataFrame(trades)
-    df["_ts"]  = pd.to_datetime(df["entry_time"], utc=True)
-    df["_grp"] = df["_ts"].dt.strftime("%G-W%V")   # ISO year + week, e.g. 2026-W21
-    keys = sorted(df["_grp"].unique())
-    mode = "long" if bar_mins >= 60 else "scalp"
-    _period_table(df, keys, keys, f"Weekly Breakdown — {pair_label}  ({mode})")
+    df["_ts"]   = pd.to_datetime(df["entry_time"], utc=True)
+    df["_week"] = df["_ts"].dt.strftime("%G-W%V")
+    df["_size"] = sizes
+    df["_pv"]   = df.apply(
+        lambda r: (0.01 * LOT_SIZE / r["entry"]) if is_jpy else (0.0001 * LOT_SIZE),
+        axis=1,
+    )
+    df["_pnl_usd"] = df["pnl_pips"] * df["_pv"] * df["_size"]
+
+    all_weeks = sorted(df["_week"].unique())
+    partial   = {all_weeks[0], all_weeks[-1]} if len(all_weeks) > 1 else set()
+
+    mode         = "long" if bar_mins >= 60 else "scalp"
+    current_week = date.today().isocalendar().week
+
+    table = Table(
+        title=f"Weekly Breakdown W{current_week:02d} — {pair_label}  ({mode})",
+        box=box.ROUNDED,
+    )
+    table.add_column("Week",       style="dim")
+    table.add_column("Trades",     justify="right")
+    table.add_column("Win %",      justify="right")
+    table.add_column("PF",         justify="right")
+    table.add_column("Total pips", justify="right")
+    table.add_column("Avg pips",   justify="right")
+    table.add_column("Balance",    justify="right")
+
+    balance      = account
+    total_pips   = 0.0
+    total_trades = 0
+
+    for week in all_weeks:
+        grp       = df[df["_week"] == week]
+        wins      = grp[grp["result"] == "WIN"]
+        losses    = grp[grp["result"] == "LOSS"]
+        wr        = len(wins) / len(grp) * 100 if len(grp) else 0.0
+        week_pips = grp["pnl_pips"].sum()
+        avg_pips  = grp["pnl_pips"].mean()
+        balance  += grp["_pnl_usd"].sum()
+        total_pips   += week_pips
+        total_trades += len(grp)
+        pf = (
+            wins["pnl_pips"].sum() / abs(losses["pnl_pips"].sum())
+            if len(losses) and losses["pnl_pips"].sum() != 0
+            else float("inf")
+        )
+        pf_str     = f"{pf:.2f}" if pf != float("inf") else "∞"
+        c          = "green" if week_pips > 0 else "red"
+        bal_c      = "green" if balance >= account else "red"
+        week_label = f"{week} *" if week in partial else week
+        table.add_row(
+            week_label, str(len(grp)), f"{wr:.1f}%", pf_str,
+            f"[{c}]{week_pips:.1f}[/]", f"[{c}]{avg_pips:.1f}[/]",
+            f"[{bal_c}]${balance:,.2f}[/]",
+        )
+
+    table.add_section()
+    c     = "green" if total_pips > 0 else "red"
+    bal_c = "green" if balance >= account else "red"
+    table.add_row(
+        f"Total ({len(all_weeks)} weeks)", str(total_trades), "", "",
+        f"[{c}]{total_pips:+.1f}[/]", "",
+        f"[{bal_c}]${balance:,.2f}[/]",
+    )
+    if partial:
+        console.print("  [dim]* partial week (backtest boundary)[/]")
+    console.print(table)
 
 
 def report_by_day(trades: list[dict], pair_label: str, bar_mins: int) -> None:
@@ -934,14 +1010,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--no-blocked-days", action="store_true",
         help="Ignore BLOCKED_DAYS gate (use to compare with/without Friday block)",
-    )
-    parser.add_argument(
-        "--no-weekly-pnl", action="store_true",
-        help="Suppress the weekly pips P&L / running-balance table",
-    )
-    parser.add_argument(
-        "--by-week", action="store_true",
-        help="Print per-ISO-week breakdown after the main summary",
     )
     parser.add_argument(
         "--by-day", action="store_true",
@@ -1000,11 +1068,8 @@ if __name__ == "__main__":
 
         report(trades, bar_mins=bar_mins, pair_label=pair_label,
                account=args.account, risk_pct=args.risk, gaps=gaps)
-        if not args.no_weekly_pnl:
-            report_weekly_pnl(trades, pair_label=pair_label, bar_mins=bar_mins,
-                              account=args.account, risk_pct=args.risk)
-        if args.by_week:
-            report_by_week(trades, pair_label=pair_label, bar_mins=bar_mins)
+        report_by_week(trades, pair_label=pair_label, bar_mins=bar_mins,
+                       account=args.account, risk_pct=args.risk)
         if args.by_day:
             report_by_day(trades, pair_label=pair_label, bar_mins=bar_mins)
         if args.by_pattern:
