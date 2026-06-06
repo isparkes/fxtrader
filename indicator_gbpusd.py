@@ -117,7 +117,7 @@ H1_RSI_PERIOD  = 14
 H4_EMA_PERIOD = 22
 
 # Daily regime gate — skip when daily ADX < threshold (ranging market)
-DAILY_ADX_MIN = 25
+DAILY_ADX_MIN = 0     # gate disabled — only active on EURUSD and AUDUSD
 
 # Day-of-week gate — blocked weekdays (0=Mon … 4=Fri)
 BLOCKED_DAYS: frozenset[int] = frozenset({4})   # Friday: breakeven PF in 60d sample
@@ -565,7 +565,7 @@ def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD", s
     return Signal(
         timestamp=now_str,
         direction=direction,
-        entry_price=round(ep, 5),
+        entry_price=round(ep_adj, 5),
         stop_loss=round(sl, 5),
         take_profit=round(tp, 5),
         atr=round(atr, 5),

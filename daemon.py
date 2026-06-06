@@ -127,7 +127,7 @@ SIGNAL_MAX_AGE_MINS = 15    # discard M5 signal bars older than this (3 bars)
 H1_MAX_BARS = 300
 M5_MAX_BARS = 600
 D1_MAX_BARS = 100
-M1_MAX_BARS = 360     # 6-hour rolling M1 window used to resample M5 and H1
+M1_MAX_BARS = 1500    # 25-hour rolling M1 window — covers full day for forming daily bar
 H1_LOOKBACK = pd.Timedelta(hours=3)
 M5_LOOKBACK = pd.Timedelta(minutes=15)
 D1_LOOKBACK = pd.Timedelta(days=2)
@@ -718,7 +718,12 @@ def _process_events(
 
     for event, price in events:
         if event == "be":
-            pass  # trailing stop is broker-managed; no action needed
+            if live and pos.trade_id:
+                trail_dist = round(pos.atr * ind.ATR_TRAIL_MULT, 5)
+                try:
+                    oanda.set_trailing_stop(pos.trade_id, trail_dist, pair)
+                except Exception as exc:
+                    log.warning("%s  OANDA set_trailing_stop failed: %s", pair.upper(), exc)
 
         elif event == "extend_tp":
             log.info(
@@ -841,7 +846,23 @@ def tick(
 
     df_1d = None
     if hasattr(ind, "compute_daily_adx") and state.cache_1d is not None and len(state.cache_1d) >= 14:
-        df_1d = ind.compute_daily_adx(state.cache_1d.copy())
+        d_base = state.cache_1d.copy()
+        if state.cache_m1 is not None:
+            day_start = pd.Timestamp.utcnow().normalize()
+            m1_today  = state.cache_m1[state.cache_m1.index >= day_start]
+            if not m1_today.empty:
+                forming_d = pd.DataFrame(
+                    {
+                        "open":   float(m1_today["open"].iloc[0]),
+                        "high":   float(m1_today["high"].max()),
+                        "low":    float(m1_today["low"].min()),
+                        "close":  float(m1_today["close"].iloc[-1]),
+                        "volume": int(m1_today["volume"].sum()),
+                    },
+                    index=pd.DatetimeIndex([day_start], tz="UTC"),
+                )
+                d_base = pd.concat([d_base, forming_d])
+        df_1d = ind.compute_daily_adx(d_base)
 
     latest = df_5m.iloc[-1]
 
@@ -898,6 +919,11 @@ def tick(
             if bias_info["direction"] != "FLAT":
                 entry = ind.find_m5_entry(df_5m, bias_info["direction"])
                 if entry and entry["bar_time"] != state.last_signal_bar:
+                    # Forming bar: bar_time equals the current (open) M5 period.
+                    # Its OHLCV updates on every M1 tick so we must not lock it
+                    # out via last_signal_bar unless a trade is actually opened.
+                    forming_m5_time = str(df_5m.index[-1])
+                    is_forming_bar  = entry["bar_time"] == forming_m5_time
                     try:
                         bar_dt = pd.Timestamp(entry["bar_time"]).tz_localize("UTC") \
                             if pd.Timestamp(entry["bar_time"]).tzinfo is None \
@@ -910,7 +936,8 @@ def tick(
                             "%s  signal bar %s is %.0f min old (max %d) — skipping",
                             pair.upper(), entry["bar_time"], bar_age_mins, SIGNAL_MAX_AGE_MINS,
                         )
-                        state.last_signal_bar = entry["bar_time"]
+                        if not is_forming_bar:
+                            state.last_signal_bar = entry["bar_time"]
                     else:
                         signal = ind.build_signal(bias_info, entry, pair.upper(), spread_pips=STANDARD_SPREADS[pair])
                         if signal.direction != "FLAT" and _tp_sane(signal):
@@ -932,9 +959,11 @@ def tick(
                                         state.last_signal_bar = entry["bar_time"]
                             else:
                                 log.info("%s  signal skipped — spread too wide", pair.upper())
-                                state.last_signal_bar = entry["bar_time"]
+                                if not is_forming_bar:
+                                    state.last_signal_bar = entry["bar_time"]
                         else:
-                            state.last_signal_bar = entry["bar_time"]
+                            if not is_forming_bar:
+                                state.last_signal_bar = entry["bar_time"]
 
     # ── Discretionary position management ───────────────────────────────────
     for tid, pos in list(managed.items()):
@@ -971,18 +1000,16 @@ def _open_automated(
     rr_ratio    = signal.rr_ratio
 
     if live:
-        ind               = PAIR_INDICATORS[pair]
-        pv                = ind.pip_value(pair)
-        trailing_distance = round(signal.risk_pips * pv, 5)
-        units             = _calc_units(pair, signal.risk_pips)
+        ind   = PAIR_INDICATORS[pair]
+        units = _calc_units(pair, signal.risk_pips)
         try:
             result = oanda.place_market_order(
-                pair              = pair,
-                direction         = signal.direction,
-                units             = units,
-                trailing_distance = trailing_distance,
-                take_profit       = signal.take_profit,
-                occult_stops      = occult_stops,
+                pair         = pair,
+                direction    = signal.direction,
+                units        = units,
+                stop_loss    = signal.stop_loss,
+                take_profit  = signal.take_profit,
+                occult_stops = occult_stops,
             )
             if "orderFillTransaction" not in result:
                 cancel = result.get("orderCancelTransaction", {})

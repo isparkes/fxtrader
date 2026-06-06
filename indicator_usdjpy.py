@@ -614,7 +614,7 @@ def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURUSD", s
     return Signal(
         timestamp=now_str,
         direction=direction,
-        entry_price=round(ep, 5),
+        entry_price=round(ep_adj, 5),
         stop_loss=round(sl, 5),
         take_profit=round(tp, 5),
         atr=round(atr, 5),

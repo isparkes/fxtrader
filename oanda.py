@@ -120,22 +120,22 @@ def place_market_order(
     pair: str,
     direction: str,
     units: int,
-    trailing_distance: float,
+    stop_loss: float,
     take_profit: float,
     occult_stops: bool = False,
 ) -> dict:
     """
-    Place a market order with a broker-side trailing stop and optional TP.
+    Place a market order with a fixed stop-loss and optional TP.
 
     Args:
-        pair:              internal key, e.g. "eurusd"
-        direction:         "BUY" or "SELL"
-        units:             positive integer — sign is applied from direction
-        trailing_distance: trailing stop distance in price units (e.g. 0.0012)
-        take_profit:       absolute price level
-        occult_stops:      when True, omit trailingStopLossOnFill/takeProfitOnFill
-                           so no stop orders are visible to the broker.
-                           The daemon closes the trade explicitly when levels are hit.
+        pair:         internal key, e.g. "eurusd"
+        direction:    "BUY" or "SELL"
+        units:        positive integer — sign is applied from direction
+        stop_loss:    absolute stop-loss price level
+        take_profit:  absolute price level
+        occult_stops: when True, omit stopLossOnFill/takeProfitOnFill
+                      so no stop orders are visible to the broker.
+                      The daemon closes the trade explicitly when levels are hit.
 
     Returns the full Oanda order-fill response dict.
     The trade ID lives at response["orderFillTransaction"]["tradeOpened"]["tradeID"].
@@ -150,8 +150,8 @@ def place_market_order(
         "timeInForce": "FOK",
     }
     if not occult_stops:
-        order["trailingStopLossOnFill"] = {"distance": _fmt_price(pair, trailing_distance)}
-        order["takeProfitOnFill"]       = {"price":    _fmt_price(pair, take_profit)}
+        order["stopLossOnFill"]   = {"price": _fmt_price(pair, stop_loss)}
+        order["takeProfitOnFill"] = {"price": _fmt_price(pair, take_profit)}
     payload = {"order": order}
     url = f"{_BASE_URL}/v3/accounts/{_ACCOUNT_ID}/orders"
     resp = requests.post(url, headers=_headers(), json=payload, timeout=10)

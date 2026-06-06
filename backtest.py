@@ -81,6 +81,12 @@ SESSION_START_UTC = 7      # London open
 SESSION_END_UTC   = 16     # NY afternoon / London close
 WEEKEND_CLOSE_HOUR = 20    # Friday UTC hour at which positions are force-closed
 
+# Forming-bar simulation: number of completed bars kept in the rolling indicator
+# window when recomputing H1 / daily indicators per M5 tick.  Wide enough that
+# EMA initialisation error is negligible (<0.5% for EMA50 at 200 bars).
+H1_IND_LOOKBACK = 200
+D_IND_LOOKBACK  = 60
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -120,23 +126,26 @@ def merge_trend(df_h1: pd.DataFrame, df_5m: pd.DataFrame) -> pd.DataFrame:
 
 def fetch_data(
     pair: str, ind, *, update: bool = True
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Scalp mode: incrementally update parquet store then load bars.
 
-    Returns (df_h1, df_4h, df_5m, df_1d, df_m1).
-      df_h1  — H1 bars with indicators, used for trend bias
-      df_4h  — H4 bars with indicators + ema_4h, Measure 4 filter
-      df_5m  — M5 bars with indicators, entry signal evaluation
-      df_1d  — Daily bars with ADX gate
-      df_m1  — M1 bars (OHLCV only), used for within-bar simulation
+    Returns (df_h1, df_4h, df_5m, df_m1, df_h1_raw, df_1d_raw).
+      df_h1    — H1 bars with indicators; used only by merge_trend for ATR forward-fill
+      df_4h    — H4 bars with indicators + ema_4h, Measure 4 filter
+      df_5m    — M5 bars with indicators, entry signal evaluation
+      df_m1    — M1 bars (OHLCV only); within-bar simulation and forming-bar construction
+      df_h1_raw — H1 OHLCV only (no indicators); run_backtest appends the forming H1
+                  bar at each M5 tick so assess_h1_bias sees a partially-formed bar,
+                  mirroring the live daemon's view exactly
+      df_1d_raw — Daily OHLCV only (no indicators); same forming-bar treatment for ADX
     """
     if update:
         datalib.update(pair)
 
-    df_m1      = datalib.load(pair, "M1")
-    df_h1_raw  = datalib.resample(df_m1, "H1")
-    df_1d_raw  = datalib.load(pair, "D")
+    df_m1     = datalib.load(pair, "M1")
+    df_h1_raw = datalib.resample(df_m1, "H1")
+    df_1d_raw = datalib.resample(df_m1, "D")   # derived from M1, not stored OANDA D
 
     df_h1 = ind.compute_h1_indicators(df_h1_raw.copy())
 
@@ -155,11 +164,7 @@ def fetch_data(
     df_5m = datalib.resample(df_m1, "M5")
     df_5m = ind.compute_m5_indicators(df_5m)
 
-    df_1d = df_1d_raw.copy()
-    if hasattr(ind, "compute_daily_adx"):
-        df_1d = ind.compute_daily_adx(df_1d)
-
-    return df_h1, df_4h, df_5m, df_1d, df_m1
+    return df_h1, df_4h, df_5m, df_m1, df_h1_raw, df_1d_raw
 
 
 def fetch_data_long(
@@ -198,6 +203,8 @@ def run_backtest(
     df_4h:       Optional[pd.DataFrame] = None,
     df_1d:       Optional[pd.DataFrame] = None,
     df_m1:       Optional[pd.DataFrame] = None,
+    df_h1_raw:   Optional[pd.DataFrame] = None,
+    df_1d_raw:   Optional[pd.DataFrame] = None,
 ) -> list[dict]:
     """
     Walk-forward simulation using tradelib.check_position_events() for all
@@ -207,34 +214,53 @@ def run_backtest(
     bar-by-bar against the M1 bars within each M5 window, resolving the
     chronological order of SL vs TP hits.
 
-    Signal generation (bias assessment and entry pattern detection) remains
-    on the M5 / H1 timeframes.
+    When df_h1_raw and df_1d_raw are also provided (scalp mode), the H1 and
+    daily bars used for assess_h1_bias() are rebuilt from M1 at every M5 tick:
+    completed bars up to the current hour/day boundary are taken from the raw
+    OHLCV frames, and a single forming bar is appended whose OHLCV reflects only
+    the M1 data seen so far within that period.  This mirrors the live daemon
+    exactly — the daemon always sees a partially-formed H1 and daily bar, never
+    the fully-closed version.
+
+    Without df_h1_raw / df_1d_raw (long mode), the legacy pre-computed slices
+    are used.
     """
     merged = merge_trend(df_h1, df_5m)
     bars   = merged.reset_index()
-
-    df_h1 = df_h1.copy()
-    df_h1.index = _to_utc(df_h1.index)
-    h1_times = df_h1.index
 
     if df_4h is not None:
         df_4h = df_4h.copy()
         df_4h.index = _to_utc(df_4h.index)
     h4_times = df_4h.index if df_4h is not None else None
 
-    if df_1d is not None and "adx" in df_1d.columns:
-        df_1d = df_1d.copy()
-        df_1d.index = _to_utc(df_1d.index)
-    else:
-        df_1d = None
-    d_times = df_1d.index if df_1d is not None else None
-
-    # M1 index for within-bar simulation (scalp mode only)
+    # M1 index for within-bar simulation and forming-bar construction
     m1_index: Optional[pd.DatetimeIndex] = None
     if df_m1 is not None and not df_m1.empty:
         df_m1 = df_m1.copy()
         df_m1.index = _to_utc(df_m1.index)
         m1_index = df_m1.index
+
+    # Forming-bar path (scalp mode): raw OHLCV frames, UTC-indexed
+    if df_h1_raw is not None:
+        df_h1_raw = df_h1_raw.copy()
+        df_h1_raw.index = _to_utc(df_h1_raw.index)
+    if df_1d_raw is not None:
+        df_1d_raw = df_1d_raw.copy()
+        df_1d_raw.index = _to_utc(df_1d_raw.index)
+
+    # Legacy path (long mode): pre-computed indicator slices
+    _df_h1_legacy: Optional[pd.DataFrame] = None
+    _h1_times_legacy: Optional[pd.DatetimeIndex] = None
+    _df_1d_legacy: Optional[pd.DataFrame] = None
+    _d_times_legacy: Optional[pd.DatetimeIndex] = None
+    if df_h1_raw is None:
+        _df_h1_legacy = df_h1.copy()
+        _df_h1_legacy.index = _to_utc(_df_h1_legacy.index)
+        _h1_times_legacy = _df_h1_legacy.index
+    if df_1d_raw is None and df_1d is not None and "adx" in df_1d.columns:
+        _df_1d_legacy = df_1d.copy()
+        _df_1d_legacy.index = _to_utc(_df_1d_legacy.index)
+        _d_times_legacy = _df_1d_legacy.index
 
     pv = ind.pip_value(pair)
 
@@ -261,7 +287,7 @@ def run_backtest(
 
             if ts.weekday() == 4 and ts.hour >= WEEKEND_CLOSE_HOUR:
                 _record_trade(
-                    trades, pos, float(row["open"]), pv, spread_pips,
+                    trades, pos, float(row["open"]), pv,
                     i, entry_idx, bar_mins, entry_pattern, forced=True,
                 )
                 if trades[-1]["result"] == "LOSS":
@@ -278,7 +304,7 @@ def run_backtest(
                     evt = _process_bar(float(m1_bar["high"]), float(m1_bar["low"]))
                     if evt is not None:
                         _record_trade(
-                            trades, pos, evt[1], pv, spread_pips,
+                            trades, pos, evt[1], pv,
                             i, entry_idx, bar_mins, entry_pattern,
                         )
                         if trades[-1]["result"] == "LOSS":
@@ -290,7 +316,7 @@ def run_backtest(
                 evt = _process_bar(float(row["high"]), float(row["low"]))
                 if evt is not None:
                     _record_trade(
-                        trades, pos, evt[1], pv, spread_pips,
+                        trades, pos, evt[1], pv,
                         i, entry_idx, bar_mins, entry_pattern,
                     )
                     if trades[-1]["result"] == "LOSS":
@@ -310,28 +336,79 @@ def run_backtest(
             continue
 
         # ── Trend bias ────────────────────────────────────────────────────────
-        h1_end = h1_times.searchsorted(ts, side="right")
-        if h1_end < 3:
-            continue
+        if df_h1_raw is not None and m1_index is not None:
+            # Forming-bar path: build the current H1 bar from M1 data up to this
+            # M5 bar's close (ts + bar_mins), matching what the live daemon sees.
+            h1_floor   = ts.floor("1h")
+            h1_raw_end = df_h1_raw.index.searchsorted(h1_floor, side="left")
+            if h1_raw_end < 15:
+                continue
+            h1_base = df_h1_raw.iloc[max(0, h1_raw_end - H1_IND_LOOKBACK):h1_raw_end]
+            m1_lo   = m1_index.searchsorted(h1_floor, side="left")
+            m1_hi   = m1_index.searchsorted(ts + pd.Timedelta(minutes=bar_mins), side="left")
+            m1_h1   = df_m1.iloc[m1_lo:m1_hi]
+            if not m1_h1.empty:
+                forming_h1 = pd.DataFrame(
+                    {
+                        "open":   float(m1_h1["open"].iloc[0]),
+                        "high":   float(m1_h1["high"].max()),
+                        "low":    float(m1_h1["low"].min()),
+                        "close":  float(m1_h1["close"].iloc[-1]),
+                        "volume": int(m1_h1["volume"].sum()),
+                    },
+                    index=pd.DatetimeIndex([h1_floor], tz="UTC"),
+                )
+                h1_for_ind = pd.concat([h1_base, forming_h1])
+            else:
+                h1_for_ind = h1_base
+            df_h1_live = ind.compute_h1_indicators(h1_for_ind)
+        else:
+            # Legacy path (long mode)
+            h1_end = _h1_times_legacy.searchsorted(ts, side="right")
+            if h1_end < 3:
+                continue
+            df_h1_live = _df_h1_legacy.iloc[:h1_end]
 
         df_4h_slice = None
         if h4_times is not None:
             h4_end      = h4_times.searchsorted(ts, side="right")
             df_4h_slice = df_4h.iloc[:h4_end] if h4_end > 0 else None
 
-        df_1d_slice = None
-        if d_times is not None:
-            d_end       = d_times.searchsorted(ts, side="right")
-            df_1d_slice = df_1d.iloc[:d_end] if d_end > 0 else None
+        if df_1d_raw is not None and m1_index is not None and hasattr(ind, "compute_daily_adx"):
+            # Forming daily bar: M1 data from UTC midnight to current M5 bar close
+            day_floor = ts.normalize()
+            d_raw_end = df_1d_raw.index.searchsorted(day_floor, side="left")
+            d_base    = df_1d_raw.iloc[max(0, d_raw_end - D_IND_LOOKBACK):d_raw_end]
+            m1_d_lo   = m1_index.searchsorted(day_floor, side="left")
+            m1_d_hi   = m1_index.searchsorted(ts + pd.Timedelta(minutes=bar_mins), side="left")
+            m1_d      = df_m1.iloc[m1_d_lo:m1_d_hi]
+            if not m1_d.empty:
+                forming_d = pd.DataFrame(
+                    {
+                        "open":   float(m1_d["open"].iloc[0]),
+                        "high":   float(m1_d["high"].max()),
+                        "low":    float(m1_d["low"].min()),
+                        "close":  float(m1_d["close"].iloc[-1]),
+                        "volume": int(m1_d["volume"].sum()),
+                    },
+                    index=pd.DatetimeIndex([day_floor], tz="UTC"),
+                )
+                d_for_ind = pd.concat([d_base, forming_d])
+            else:
+                d_for_ind = d_base
+            df_1d_slice = ind.compute_daily_adx(d_for_ind) if len(d_for_ind) >= 30 else None
+        elif _d_times_legacy is not None:
+            d_end       = _d_times_legacy.searchsorted(ts, side="right")
+            df_1d_slice = _df_1d_legacy.iloc[:d_end] if d_end > 0 else None
+        else:
+            df_1d_slice = None
 
         if hasattr(ind, "DAILY_ADX_MIN"):
             bias_info = ind.assess_h1_bias(
-                df_h1.iloc[:h1_end], df_4h=df_4h_slice, df_1d=df_1d_slice
+                df_h1_live, df_4h=df_4h_slice, df_1d=df_1d_slice
             )
         else:
-            bias_info = ind.assess_h1_bias(
-                df_h1.iloc[:h1_end], df_4h=df_4h_slice
-            )
+            bias_info = ind.assess_h1_bias(df_h1_live, df_4h=df_4h_slice)
 
         bias = bias_info["direction"]
         if bias == "FLAT":
@@ -345,39 +422,18 @@ def run_backtest(
         if entry_result["bar_time"] != str(ts):
             continue
 
-        # ── Compute SL/TP and open position ───────────────────────────────────
-        h1_atr = row.get("h1_atr")
-        atr    = float(h1_atr) if not pd.isna(h1_atr) else bias_info["atr"]
-        spread = spread_pips * pv
-
-        sl_tp = ind.compute_sl_tp(entry_result, bias, atr, spread, pv)
-        if sl_tp is None:
+        # ── Compute SL/TP via the same build_signal path as the daemon ─────────
+        # Entry is at the signal bar's close (spread-adjusted), matching the
+        # daemon's market-order fill timing.  Spread is embedded in entry_price;
+        # _record_trade does NOT deduct it separately.
+        signal = ind.build_signal(bias_info, entry_result, pair.upper(),
+                                  spread_pips=spread_pips)
+        if signal.direction == "FLAT":
             continue
-        entry_p, sl, tp = sl_tp
 
-        # Advance entry to next bar's open: the live daemon places the order
-        # after the signal bar closes, so it fills at the following bar's open.
-        if i + 1 >= len(merged):
-            continue
-        next_open    = float(merged.iloc[i + 1]["open"])
-        sl_pips_dist = abs(entry_p - sl) / pv
-        tp_pips_dist = abs(tp - entry_p) / pv
-        if bias == "BUY":
-            entry_p = next_open
-            sl      = entry_p - sl_pips_dist * pv
-            tp      = entry_p + tp_pips_dist * pv
-            if next_open <= sl:
-                continue
-        else:
-            entry_p = next_open
-            sl      = entry_p + sl_pips_dist * pv
-            tp      = entry_p - tp_pips_dist * pv
-            if next_open >= sl:
-                continue
-
-        risk_pips   = abs(entry_p - sl) / pv
-        reward_pips = abs(tp - entry_p) / pv
-        rr_ratio    = reward_pips / risk_pips if risk_pips > 0 else 0.0
+        entry_p = signal.entry_price
+        sl      = signal.stop_loss
+        tp      = signal.take_profit
 
         pos = tradelib.Position(
             pair         = pair,
@@ -387,12 +443,12 @@ def run_backtest(
             entry_price  = entry_p,
             stop_loss    = sl,
             take_profit  = tp,
-            atr          = atr,
-            risk_pips    = risk_pips,
-            reward_pips  = reward_pips,
-            rr_ratio     = rr_ratio,
+            atr          = signal.atr,
+            risk_pips    = signal.risk_pips,
+            reward_pips  = signal.reward_pips,
+            rr_ratio     = signal.rr_ratio,
             opened_at    = str(ts),
-            basis        = entry_result.get("pattern", ""),
+            basis        = signal.entry_basis,
             original_tp  = tp,
             best_price   = entry_p,
         )
@@ -403,22 +459,22 @@ def run_backtest(
 
 
 def _record_trade(
-    trades:       list[dict],
-    pos:          tradelib.Position,
-    exit_price:   float,
-    pv:           float,
-    spread_pips:  float,
-    bar_idx:      int,
-    entry_idx:    int,
-    bar_mins:     int,
-    pattern:      str,
-    forced:       bool = False,
+    trades:     list[dict],
+    pos:        tradelib.Position,
+    exit_price: float,
+    pv:         float,
+    bar_idx:    int,
+    entry_idx:  int,
+    bar_mins:   int,
+    pattern:    str,
+    forced:     bool = False,
 ) -> None:
     held     = bar_idx - entry_idx
+    # Spread is embedded in entry_price via build_signal (ep_adj); no separate deduction.
     pnl_pips = (
         (exit_price - pos.entry_price) / pv
         * (1 if pos.direction == "BUY" else -1)
-    ) - spread_pips
+    )
     result = "WIN" if pnl_pips > 0 else "LOSS"
     trades.append({
         "entry_time": pos.opened_at,
@@ -427,6 +483,7 @@ def _record_trade(
         "exit":       round(exit_price, 5),
         "sl":         round(pos.stop_loss, 5),
         "tp":         round(pos.take_profit, 5),
+        "risk_pips":  round(pos.risk_pips, 1),
         "held_bars":  held,
         "held_mins":  held * bar_mins,
         "pnl_pips":   round(pnl_pips, 1),
@@ -435,6 +492,32 @@ def _record_trade(
         "pattern":    pattern,
         "extended":   pos.tp_extended,
     })
+
+
+# ── Data-gap detection ───────────────────────────────────────────────────────
+
+def _find_data_gaps(df: pd.DataFrame, bar_mins: int) -> list[tuple]:
+    """Return (gap_start, gap_end, duration) tuples for unexpected bar gaps.
+
+    Weekday FX sessions are continuous, so any intra-week gap wider than 1 hour
+    (scalp) or 4 hours (long) is flagged.  Fri/Sat→Sun/Mon weekend gaps that
+    are >= 2d 1h are normal and suppressed; shorter gaps are still reported.
+    """
+    idx = _to_utc(df.index)
+    if len(idx) < 2:
+        return []
+    threshold = pd.Timedelta(hours=1 if bar_mins <= 5 else 4)
+    gaps: list[tuple] = []
+    for i in range(1, len(idx)):
+        gap = idx[i] - idx[i - 1]
+        if gap <= threshold:
+            continue
+        d_prev = idx[i - 1].weekday()
+        d_curr = idx[i].weekday()
+        if d_prev >= 4 and d_curr in (0, 1, 6) and gap >= pd.Timedelta(hours=44):
+            continue
+        gaps.append((idx[i - 1], idx[i], gap))
+    return gaps
 
 
 # ── Statistics ────────────────────────────────────────────────────────────────
@@ -456,11 +539,11 @@ def _compute_stats(trades: list[dict], bar_mins: int) -> dict:
     cum    = df["pnl_pips"].cumsum()
     max_dd = (cum - cum.cummax()).min()
 
-    # Derive trading days from actual trade timestamps if available
+    start_date = end_date = None
     try:
-        first = pd.Timestamp(df["entry_time"].iloc[0])
-        last  = pd.Timestamp(df["entry_time"].iloc[-1])
-        trading_days = max(1, (last - first).days)
+        start_date   = pd.Timestamp(df["entry_time"].iloc[0])
+        end_date     = pd.Timestamp(df["entry_time"].iloc[-1])
+        trading_days = max(1, (end_date - start_date).days)
     except Exception:
         trading_days = 730 if bar_mins >= 60 else 60
 
@@ -469,6 +552,7 @@ def _compute_stats(trades: list[dict], bar_mins: int) -> dict:
         wr=wr, aw=aw, al=al, exp=exp, total=total, pf=pf,
         max_dd=max_dd, trades_per_day=len(df) / trading_days,
         avg_mins=df["held_mins"].mean(), forced=int(df["forced"].sum()),
+        start_date=start_date, end_date=end_date,
     )
 
 
@@ -480,9 +564,11 @@ def _compute_sizing(
     LOT_SIZE     = 100_000
     is_jpy       = "jpy" in pair.lower()
 
+    pv = 0.01 if is_jpy else 0.0001
     sizes = []
     for t in trades:
-        stop_dist = abs(t["entry"] - t["sl"])
+        risk_pips = t.get("risk_pips") or abs(t["entry"] - t["sl"]) / pv
+        stop_dist = risk_pips * pv
         if stop_dist == 0:
             sizes.append(0.0)
             continue
@@ -501,6 +587,7 @@ def report(
     pair_label: str   = "EURUSD",
     account:    float = 10_000,
     risk_pct:   float = 1.0,
+    gaps:       Optional[list] = None,
 ) -> None:
     """Print a summary table and save the full trade log to CSV."""
     if not trades:
@@ -512,6 +599,14 @@ def report(
     avg_size = sum(sizes) / len(sizes) if sizes else 0.0
     min_size = min(sizes) if sizes else 0.0
     max_size = max(sizes) if sizes else 0.0
+
+    # Running balance — pnl_pips already has spread deducted
+    is_jpy   = "jpy" in pair_label.lower()
+    LOT_SIZE = 100_000
+    balance  = account
+    for t, size in zip(trades, sizes):
+        pip_dollar = (0.01 * LOT_SIZE / t["entry"]) if is_jpy else (0.0001 * LOT_SIZE)
+        balance   += t["pnl_pips"] * pip_dollar * size
 
     if bar_mins >= 60:
         hold_str   = f"{s['avg_mins'] / 60:.1f} hrs"
@@ -527,6 +622,10 @@ def report(
     table.add_column("Metric", style="dim")
     table.add_column("Value",  justify="right")
 
+    fmt_date = lambda d: d.strftime("%Y-%m-%d") if d else "—"
+    table.add_row("Start date",    fmt_date(s["start_date"]))
+    table.add_row("End date",      fmt_date(s["end_date"]))
+    table.add_row("──────────────", "──────────────")
     table.add_row("Total trades",  str(s["n"]))
     table.add_row("Trades / day",  f"{s['trades_per_day']:.1f}")
     table.add_row("Wins",          str(s["wins"]))
@@ -548,8 +647,24 @@ def report(
     )
     table.add_row("Avg size",   f"{avg_size:.2f} {size_unit}")
     table.add_row("Size range", f"{min_size:.2f} – {max_size:.2f} {size_unit}")
+    bal_color = "green" if balance >= account else "red"
+    table.add_row(
+        "Final balance",
+        f"[{bal_color}]${balance:,.2f}[/]  "
+        f"([{bal_color}]{'+' if balance >= account else ''}{balance - account:,.2f}[/])",
+    )
 
     console.print(table)
+
+    if gaps:
+        console.print(f"\n[yellow]⚠  {len(gaps)} data gap(s) in bar history:[/]")
+        for g_start, g_end, g_dur in gaps[:10]:
+            console.print(
+                f"  [dim]{g_start.strftime('%Y-%m-%d %H:%M')} → "
+                f"{g_end.strftime('%Y-%m-%d %H:%M')}  ({g_dur})[/]"
+            )
+        if len(gaps) > 10:
+            console.print(f"  [dim]… and {len(gaps) - 10} more[/]")
 
     df = pd.DataFrame(trades)
     df["suggested_size"] = sizes
@@ -685,6 +800,79 @@ def report_by_pattern(trades: list[dict], pair_label: str, bar_mins: int) -> Non
     console.print(table)
 
 
+def report_weekly_pnl(
+    trades:     list[dict],
+    pair_label: str,
+    bar_mins:   int,
+    account:    float = 10_000,
+    risk_pct:   float = 1.0,
+) -> None:
+    """Print weekly pips P&L and running balance for complete ISO weeks only."""
+    if not trades:
+        return
+
+    sizes, _ = _compute_sizing(trades, pair_label, account, risk_pct)
+    LOT_SIZE  = 100_000
+    is_jpy    = "jpy" in pair_label.lower()
+
+    df = pd.DataFrame(trades)
+    df["_ts"]    = pd.to_datetime(df["entry_time"], utc=True)
+    df["_week"]  = df["_ts"].dt.strftime("%G-W%V")
+    df["_size"]  = sizes
+
+    all_weeks = sorted(df["_week"].unique())
+    if len(all_weeks) < 3:
+        return                          # not enough weeks to identify complete ones
+    complete_weeks = all_weeks[1:-1]    # drop first and last (potentially partial)
+
+    mode = "long" if bar_mins >= 60 else "scalp"
+    table = Table(
+        title=f"Weekly P&L (complete weeks) — {pair_label}  ({mode})",
+        box=box.ROUNDED,
+    )
+    table.add_column("Week",     style="dim")
+    table.add_column("Trades",   justify="right")
+    table.add_column("Pips",     justify="right")
+    table.add_column("Balance",  justify="right")
+
+    balance      = account
+    total_pips   = 0.0
+
+    # pre-compute dollar P&L per trade
+    df["_pv"] = df.apply(
+        lambda r: (0.01 * LOT_SIZE / r["entry"]) if is_jpy else (0.0001 * LOT_SIZE),
+        axis=1,
+    )
+    df["_pnl_usd"] = df["pnl_pips"] * df["_pv"] * df["_size"]
+
+    for week in complete_weeks:
+        grp        = df[df["_week"] == week]
+        week_pips  = grp["pnl_pips"].sum()
+        week_usd   = grp["_pnl_usd"].sum()
+        balance   += week_usd
+        total_pips += week_pips
+        c = "green" if week_pips >= 0 else "red"
+        bal_c = "green" if balance >= account else "red"
+        table.add_row(
+            week,
+            str(len(grp)),
+            f"[{c}]{week_pips:+.1f}[/]",
+            f"[{bal_c}]${balance:,.2f}[/]",
+        )
+
+    table.add_section()
+    c = "green" if total_pips >= 0 else "red"
+    bal_c = "green" if balance >= account else "red"
+    table.add_row(
+        f"Total ({len(complete_weeks)} weeks)",
+        "",
+        f"[{c}]{total_pips:+.1f}[/]",
+        f"[{bal_c}]${balance:,.2f}[/]",
+    )
+
+    console.print(table)
+
+
 def report_by_week(trades: list[dict], pair_label: str, bar_mins: int) -> None:
     """Print a per-ISO-week breakdown table."""
     if not trades:
@@ -748,6 +936,10 @@ if __name__ == "__main__":
         help="Ignore BLOCKED_DAYS gate (use to compare with/without Friday block)",
     )
     parser.add_argument(
+        "--no-weekly-pnl", action="store_true",
+        help="Suppress the weekly pips P&L / running-balance table",
+    )
+    parser.add_argument(
         "--by-week", action="store_true",
         help="Print per-ISO-week breakdown after the main summary",
     )
@@ -786,24 +978,31 @@ if __name__ == "__main__":
 
         if args.long:
             df_trend, df_entry = fetch_data_long(pair_key, ind, update=do_update)
+            gaps   = _find_data_gaps(df_entry, 60)
             trades = run_backtest(
                 df_trend, df_entry, bar_mins=60,
                 spread_pips=cfg["spread_long"], use_session=False,
                 pair=pair_key, ind=ind,
             )
         else:
-            df_h1, df_4h, df_5m, df_1d, df_m1 = fetch_data(
+            df_h1, df_4h, df_5m, df_m1, df_h1_raw, df_1d_raw = fetch_data(
                 pair_key, ind, update=do_update
             )
-            trades = run_backtest(
+            _gap_src = df_m1 if (df_m1 is not None and not df_m1.empty) else df_5m
+            gaps     = _find_data_gaps(_gap_src, 1 if (df_m1 is not None and not df_m1.empty) else 5)
+            trades   = run_backtest(
                 df_h1, df_5m, bar_mins=5,
                 spread_pips=cfg["spread_scalp"], use_session=use_sess,
                 pair=pair_key, ind=ind,
-                df_4h=df_4h, df_1d=df_1d, df_m1=df_m1,
+                df_4h=df_4h, df_m1=df_m1,
+                df_h1_raw=df_h1_raw, df_1d_raw=df_1d_raw,
             )
 
         report(trades, bar_mins=bar_mins, pair_label=pair_label,
-               account=args.account, risk_pct=args.risk)
+               account=args.account, risk_pct=args.risk, gaps=gaps)
+        if not args.no_weekly_pnl:
+            report_weekly_pnl(trades, pair_label=pair_label, bar_mins=bar_mins,
+                              account=args.account, risk_pct=args.risk)
         if args.by_week:
             report_by_week(trades, pair_label=pair_label, bar_mins=bar_mins)
         if args.by_day:

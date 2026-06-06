@@ -130,7 +130,7 @@ H1_RSI_PERIOD  = 14
 H4_EMA_PERIOD = 22
 
 # Daily regime gate — suppress entries when daily ADX < threshold
-DAILY_ADX_MIN = 18    # between EURUSD (17) and initial 20 — balances signal freq vs quality
+DAILY_ADX_MIN = 0     # gate disabled — backtest shows gate hurts EURJPY (PF 0.54 vs 0.85 without)
 
 # Day-of-week gate — blocked weekdays (0=Mon … 4=Fri)
 BLOCKED_DAYS: frozenset[int] = frozenset({4})   # Friday
@@ -627,7 +627,7 @@ def build_signal(h1_bias: dict, entry: Optional[dict], symbol: str = "EURJPY",
     return Signal(
         timestamp=now_str,
         direction=direction,
-        entry_price=round(ep, 5),
+        entry_price=round(ep_adj, 5),
         stop_loss=round(sl, 5),
         take_profit=round(tp, 5),
         atr=round(atr, 5),

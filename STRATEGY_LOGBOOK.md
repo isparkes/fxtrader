@@ -1326,3 +1326,45 @@ Live combined W23: 8 real automated closes, 25% WR, −22.9 pips. Two null-ID gh
 - **Daemon restart ghost events (Jun 03, 07:13 UTC)** produced two null-ID close events in fx_trades.jsonl that match already-closed trades. The daemon lost state on restart and re-closed phantom positions. No real P&L impact confirmed (OANDA trade IDs do not match any live open). Root cause: the JSONL replay path does not correctly verify whether a trade_id is still open on OANDA before issuing a close. Should be investigated before the next high-volatility period.
 
 ---
+
+## Code changes — 2026-06-06
+
+### Strategy / parameter changes
+
+1. **EURJPY: `DAILY_ADX_MIN` 18 → 0 (gate disabled).** Backtest showed the gate was destructive for EURJPY: PF 0.54 with the gate vs 0.85 without. Root cause is that EURJPY trends in short, sharp bursts that are frequently below the ADX threshold. Gate remains on EURUSD (17) and AUDUSD (18) where it adds value.
+
+2. **GBPUSD: `DAILY_ADX_MIN` 25 → 0 (gate disabled).** GBPUSD is not in live rotation but the parameter is kept aligned with backtest-validated config. Gate had no measured benefit given the pair's existing Friday block and position-limit exclusion.
+
+### Order management: fixed SL replaces broker-side trailing stop
+
+3. **`oanda.place_market_order`: `trailing_distance` → `stop_loss` (fixed price).** The order payload now sends `stopLossOnFill` with an absolute price level instead of `trailingStopLossOnFill` with a distance. Broker-managed trailing stops were inconsistently executed on OANDA's side during fast markets; the daemon's internal trailing logic (`tradelib.check_position_events`) already re-evaluates the stop on every tick, making the broker-side trail redundant.
+
+4. **Trailing stop activation on BE event (`daemon._process_events`).** The `"be"` (breakeven) event handler was a no-op (`pass`). It now calls `oanda.set_trailing_stop(pos.trade_id, trail_dist, pair)` where `trail_dist = atr × ATR_TRAIL_MULT`. This means the broker-side stop begins trailing only after the internal BE trigger fires, matching the documented strategy intent. Previously the trailing stop was set at order entry and trailed from the start.
+
+### Backtest / daemon fidelity: forming-bar simulation
+
+5. **Forming-bar simulation in `backtest.run_backtest` (scalp mode).** H1 and daily bars used by `assess_h1_bias()` are now rebuilt from M1 data at each M5 tick instead of using pre-computed slices. The current (open) H1 period is constructed by aggregating all M1 bars since the hour boundary and appending a single forming row; the same is done for the daily bar. This mirrors what the live daemon sees at any given tick — a partially-formed H1 and daily bar — rather than the fully-closed bar that the previous backtest used. `fetch_data` returns `df_h1_raw` and `df_1d_raw` (OHLCV only, no pre-computed indicators) for this path; the daily bar is now derived from M1 resampling rather than the stored OANDA D granularity. Constants `H1_IND_LOOKBACK = 200` and `D_IND_LOOKBACK = 60` control how many completed bars precede the forming bar when indicators are recomputed (wide enough that EMA initialisation error is <0.5%).
+
+6. **Forming-bar simulation in `daemon.tick`.** Daily bar computation (`compute_daily_adx`) now appends a forming daily bar built from `state.cache_m1` M1 data since UTC midnight, matching the backtest path above. `M1_MAX_BARS` increased from 360 to 1500 (25-hour rolling window) to ensure enough M1 history to construct today's forming bar. Previously the daemon always fed `compute_daily_adx` only completed daily bars, so the gate could lag one full day at session open.
+
+7. **Forming M5 bar guard in `daemon.tick`.** `last_signal_bar` is no longer set when the signal comes from the current (open, forming) M5 bar and the signal is stale or rejected. Previously, rejecting a signal from the forming bar would permanently lock that bar's timestamp, causing the daemon to ignore that bar even after it closed and its OHLCV settled. The guard now only locks `last_signal_bar` when (a) a trade is actually opened, (b) the bar is confirmed closed (not the forming bar), or (c) the signal passes all checks but spread is too wide.
+
+### Signal path unification
+
+8. **Backtest now uses `ind.build_signal()` (same path as daemon).** Previously `run_backtest` called `ind.compute_sl_tp()` then advanced entry to the next bar's open. It now calls `ind.build_signal(bias_info, entry_result, pair, spread_pips=...)` directly, producing a `Signal` object with `entry_price`, `stop_loss`, `take_profit`, `risk_pips`, and `reward_pips`. Entry is at the signal bar's close (spread-adjusted), matching the daemon's market-order fill timing. This removes a systematic fill-timing gap where the backtest entered one bar later than the daemon.
+
+9. **`ep_adj` bug fix in all five indicator `build_signal` functions** (`indicator_eurusd.py`, `indicator_usdjpy.py`, `indicator_audusd.py`, `indicator_gbpusd.py`, `indicator_eurjpy.py`). The returned `Signal.entry_price` was `round(ep, 5)` (the mid price before spread adjustment) instead of `round(ep_adj, 5)` (the spread-adjusted fill price). This caused the SL/TP levels in the returned signal to be calculated relative to the correct `ep_adj` but the entry price field itself to report the unadjusted value — meaning `risk_pips` and `rr_ratio` embedded in the signal were correct, but any caller that used `signal.entry_price` directly (including the daemon's position sizing and the backtest's `_record_trade` P&L calc) was operating on the wrong price. Fix: return `ep_adj` from all five files.
+
+10. **Spread accounting in `_record_trade`.** The `spread_pips` argument has been removed. P&L is now computed as `(exit − entry) / pv × direction` with no deduction, because `entry_price` from `build_signal` is already spread-adjusted (`ep_adj`). Callers no longer pass `spread_pips` to `_record_trade`.
+
+### Backtest reporting
+
+11. **`risk_pips` in trade record.** `_record_trade()` now writes `risk_pips` (rounded to 1 dp) directly into each trade dict. `_compute_sizing` uses this stored value instead of re-deriving stop distance from `abs(entry − sl) / pip_value`, removing a floating-point precision issue on JPY pairs.
+
+12. **Data-gap detection (`_find_data_gaps`).** New helper that scans the bar index for unexpected time gaps (≥1 h for scalp, ≥4 h for long). Normal Fri→Sun weekend gaps (≥44 h) are suppressed. Reported as a yellow warning block in `report()`, listing up to 10 gaps. Detects stale or incomplete parquet data before interpreting P&L.
+
+13. **Report enhancements.** Summary table shows `Start date` / `End date` rows and a colour-coded `Final balance` row (compounded dollar result with net change).
+
+14. **Weekly P&L table (`report_weekly_pnl`).** Printed by default; suppress with `--no-weekly-pnl`. One row per complete ISO week (first and last partial weeks dropped): trade count, pips P&L, and running balance. Identifies which calendar weeks drive the aggregate result.
+
+---
