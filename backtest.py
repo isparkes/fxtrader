@@ -587,6 +587,7 @@ def report(
     account:    float = 10_000,
     risk_pct:   float = 1.0,
     gaps:       Optional[list] = None,
+    df_m1:      Optional[pd.DataFrame] = None,
 ) -> None:
     """Print a summary table and save the full trade log to CSV."""
     if not trades:
@@ -622,8 +623,12 @@ def report(
     table.add_column("Value",  justify="right")
 
     fmt_date = lambda d: d.strftime("%Y-%m-%d") if d else "—"
-    table.add_row("Start date",    fmt_date(s["start_date"]))
-    table.add_row("End date",      fmt_date(s["end_date"]))
+    if df_m1 is not None and not df_m1.empty:
+        table.add_row("M1 data from",  fmt_date(pd.Timestamp(df_m1.index[0])))
+        table.add_row("M1 data to",    fmt_date(pd.Timestamp(df_m1.index[-1])))
+        table.add_row("──────────────", "──────────────")
+    table.add_row("First trade",   fmt_date(s["start_date"]))
+    table.add_row("Last trade",    fmt_date(s["end_date"]))
     table.add_row("──────────────", "──────────────")
     table.add_row("Total trades",  str(s["n"]))
     table.add_row("Trades / day",  f"{s['trades_per_day']:.1f}")
@@ -1067,7 +1072,8 @@ if __name__ == "__main__":
             )
 
         report(trades, bar_mins=bar_mins, pair_label=pair_label,
-               account=args.account, risk_pct=args.risk, gaps=gaps)
+               account=args.account, risk_pct=args.risk, gaps=gaps,
+               df_m1=df_m1 if not args.long else None)
         report_by_week(trades, pair_label=pair_label, bar_mins=bar_mins,
                        account=args.account, risk_pct=args.risk)
         if args.by_day:
