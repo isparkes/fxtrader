@@ -1001,6 +1001,7 @@ def _open_automated(
 
     if live:
         ind   = PAIR_INDICATORS[pair]
+        pv    = ind.pip_value(pair)
         units = _calc_units(pair, signal.risk_pips)
         try:
             result = oanda.place_market_order(
