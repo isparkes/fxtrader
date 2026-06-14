@@ -1404,3 +1404,34 @@ Live combined W23: 8 real automated closes, 25% WR, −22.9 pips. Two null-ID gh
 14. **Weekly P&L table (`report_weekly_pnl`).** Printed by default; suppress with `--no-weekly-pnl`. One row per complete ISO week (first and last partial weeks dropped): trade count, pips P&L, and running balance. Identifies which calendar weeks drive the aggregate result.
 
 ---
+
+## USDJPY ADX Gate — 2026-06-14
+
+**Decision: `DAILY_ADX_MIN` raised from 0 → 18 in `indicator_usdjpy.py`.**
+
+### Motivation
+
+Three consecutive losing weeks (W22–W24) driven primarily by USDJPY:
+- W22: −27.7p live (4 losses)
+- W23: −46.9p live (7 losses, adjusted for ghost closes)
+- W24: mixed; USDJPY daily ADX dropped to 14.1 as of Jun 11
+
+Daily ADX analysis (using `ta.ADXIndicator`, 90d OANDA daily data) showed USDJPY ADX at 14.1 on Jun 11 with +DI (19.4) ≈ −DI (19.1) — effectively a ranging market with no directional conviction. The pair has been trading in a 159–160.5 range since mid-May; Supertrend and HA pullback patterns both require follow-through that the range is not providing.
+
+### Sweep results (90d backtest, `--no-update`)
+
+| ADX threshold | Trades | WR    |  PF  | Expec     | Total pips | Max DD   |
+|---------------|--------|-------|------|-----------|------------|----------|
+| 0 (prior)     |     53 | 22.6% | 1.81 |  5.0 p/tr |    +263.2  | −112.5 p |
+| 12            |     53 | 22.6% | 1.81 |  5.0 p/tr |    +263.2  | −112.5 p |
+| 15            |     52 | 23.1% | 1.85 |  5.2 p/tr |    +270.2  | −112.5 p |
+| **18**        | **42** |**23.8%**|**2.16**|**7.1 p/tr**|**+299.4**|**−80.0 p**|
+| 20            |     40 | 22.5% | 1.75 |  4.7 p/tr |    +187.4  |  −80.0 p |
+| 22            |     27 | 18.5% | 1.16 |  1.1 p/tr |     +29.7  |  −73.0 p |
+| 25            |     25 | 20.0% | 1.27 |  1.8 p/tr |     +44.7  |  −65.0 p |
+
+ADX≥18 is the clear inflection point: PF +0.35, max DD −32.5p, with only 11 trades blocked. Above 18, over-filtering collapses PF. ADX=12/15 make no material difference (no trades existed in the 0–12 ADX range; only 1 in the 12–15 range).
+
+### Effect
+
+USDJPY ADX=18 aligns with the existing AUDUSD gate (18) and EURUSD gate (17), ending USDJPY's special exemption. With the current ADX at 14.1, USDJPY signals are immediately suppressed until a real trend re-establishes (ADX > 18 on daily bars).
