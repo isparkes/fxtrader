@@ -119,7 +119,8 @@ H1_RSI_PERIOD  = 14
 H4_EMA_PERIOD = 22
 
 # Daily regime gate — skip when daily ADX < threshold (ranging market)
-DAILY_ADX_MIN = 18
+DAILY_ADX_MIN  = 18   # enter range mode when ADX drops below this
+DAILY_ADX_HYST = 3    # hysteresis band: trend only resumes at ADX_MIN + ADX_HYST
 
 # Day-of-week gate — blocked weekdays (0=Mon … 4=Fri)
 BLOCKED_DAYS: frozenset[int] = frozenset({4})   # Friday: PF 0.41 — strongly negative
@@ -199,6 +200,22 @@ def compute_daily_adx(df: pd.DataFrame) -> pd.DataFrame:
     adx = ADXIndicator(high=df["high"], low=df["low"], close=df["close"], window=14)
     df["adx"] = adx.adx()
     return df
+
+def _adx_range_regime(df_1d: pd.DataFrame) -> bool:
+    """True = market is in range regime; suppress trend entries.
+
+    Walks backwards through daily ADX values to find the most recent
+    definitive crossing.  Range mode triggers at ADX < DAILY_ADX_MIN and
+    only clears when ADX rises above DAILY_ADX_MIN + DAILY_ADX_HYST,
+    avoiding flip-flopping around the threshold.
+    """
+    adx_high = DAILY_ADX_MIN + DAILY_ADX_HYST
+    for v in df_1d["adx"].dropna().iloc[::-1]:
+        if v < DAILY_ADX_MIN:
+            return True
+        if v > adx_high:
+            return False
+    return False
 
 def compute_m5_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -316,8 +333,7 @@ def assess_h1_bias(df: pd.DataFrame, df_4h: Optional[pd.DataFrame] = None,
             direction = "FLAT"
 
     if direction != "FLAT" and df_1d is not None and len(df_1d) >= 14:
-        adx_val = df_1d.iloc[-1].get("adx")
-        if adx_val is not None and not pd.isna(adx_val) and float(adx_val) < DAILY_ADX_MIN:
+        if _adx_range_regime(df_1d):
             direction = "FLAT"
 
     return {
