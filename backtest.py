@@ -137,14 +137,15 @@ def fetch_data(
       df_h1_raw — H1 OHLCV only (no indicators); run_backtest appends the forming H1
                   bar at each M5 tick so assess_h1_bias sees a partially-formed bar,
                   mirroring the live daemon's view exactly
-      df_1d_raw — Daily OHLCV only (no indicators); same forming-bar treatment for ADX
+      df_1d_raw — OANDA native daily bars (no indicators); used directly as the daemon
+                  uses datalib.load("D") — no forming-bar construction for daily
     """
     if update:
         datalib.update(pair)
 
     df_m1     = datalib.load(pair, "M1")
     df_h1_raw = datalib.resample(df_m1, "H1")
-    df_1d_raw = datalib.resample(df_m1, "D")   # derived from M1, not stored OANDA D
+    df_1d_raw = datalib.load(pair, "D")          # OANDA native daily bars — same source as daemon
 
     df_h1 = ind.compute_h1_indicators(df_h1_raw.copy())
 
@@ -238,6 +239,10 @@ def run_backtest(
         df_m1 = df_m1.copy()
         df_m1.index = _to_utc(df_m1.index)
         m1_index = df_m1.index
+
+    # Normalise df_5m index so iloc positions align with merged/bars throughout
+    df_5m = df_5m.copy()
+    df_5m.index = _to_utc(df_5m.index)
 
     # Forming-bar path (scalp mode): raw OHLCV frames, UTC-indexed
     if df_h1_raw is not None:
@@ -373,29 +378,14 @@ def run_backtest(
             h4_end      = h4_times.searchsorted(ts, side="right")
             df_4h_slice = df_4h.iloc[:h4_end] if h4_end > 0 else None
 
-        if df_1d_raw is not None and m1_index is not None and hasattr(ind, "compute_daily_adx"):
-            # Forming daily bar: M1 data from UTC midnight to current M5 bar close
-            day_floor = ts.normalize()
-            d_raw_end = df_1d_raw.index.searchsorted(day_floor, side="left")
-            d_base    = df_1d_raw.iloc[max(0, d_raw_end - D_IND_LOOKBACK):d_raw_end]
-            m1_d_lo   = m1_index.searchsorted(day_floor, side="left")
-            m1_d_hi   = m1_index.searchsorted(ts + pd.Timedelta(minutes=bar_mins), side="left")
-            m1_d      = df_m1.iloc[m1_d_lo:m1_d_hi]
-            if not m1_d.empty:
-                forming_d = pd.DataFrame(
-                    {
-                        "open":   float(m1_d["open"].iloc[0]),
-                        "high":   float(m1_d["high"].max()),
-                        "low":    float(m1_d["low"].min()),
-                        "close":  float(m1_d["close"].iloc[-1]),
-                        "volume": int(m1_d["volume"].sum()),
-                    },
-                    index=pd.DatetimeIndex([day_floor], tz="UTC"),
-                )
-                d_for_ind = pd.concat([d_base, forming_d])
-            else:
-                d_for_ind = d_base
-            df_1d_slice = ind.compute_daily_adx(d_for_ind) if len(d_for_ind) >= 30 else None
+        if df_1d_raw is not None and hasattr(ind, "compute_daily_adx"):
+            # Use OANDA native daily bars (same source as daemon).  OANDA daily
+            # bars open at ~22:00 UTC, so a bar is complete 24h after its open
+            # time.  Use bars whose open time is more than 24h before ts.
+            d_cutoff  = ts - pd.Timedelta(hours=24)
+            d_raw_end = df_1d_raw.index.searchsorted(d_cutoff, side="right")
+            d_slice   = df_1d_raw.iloc[max(0, d_raw_end - D_IND_LOOKBACK):d_raw_end]
+            df_1d_slice = ind.compute_daily_adx(d_slice) if len(d_slice) >= 30 else None
         elif _d_times_legacy is not None:
             d_end       = _d_times_legacy.searchsorted(ts, side="right")
             df_1d_slice = _df_1d_legacy.iloc[:d_end] if d_end > 0 else None
@@ -413,12 +403,44 @@ def run_backtest(
         if bias == "FLAT":
             continue
 
-        # ── Entry pattern ─────────────────────────────────────────────────────
-        m5_slice     = merged.iloc[max(0, i - 35): i + 1]
-        entry_result = ind.find_m5_entry(m5_slice, bias, use_session=False)
+        # ── Entry pattern — forming-bar scan then complete-bar fallback ──────
+        # Mirrors the daemon's 60-second M1 polling: for each M1 bar within
+        # this M5 period, build the partial bar that the daemon would have seen,
+        # recompute M5 indicators, and check for a signal.  The first M1 bar
+        # that produces a signal on the current period (bar_time == ts) is used.
+        # If the forming scan finds nothing, evaluate the complete bar as before.
+        entry_result = None
+        ts_str       = str(ts)
+        if m1_index is not None:
+            m5_end    = ts + pd.Timedelta(minutes=bar_mins)
+            m1_lo     = m1_index.searchsorted(ts,     side="left")
+            m1_hi     = m1_index.searchsorted(m5_end, side="left")
+            m1_in_bar = df_m1.iloc[m1_lo:m1_hi]
+            raw_hist  = df_5m.iloc[max(0, i - 100): i][["open", "high", "low", "close", "volume"]]
+            for m1_j in range(len(m1_in_bar)):
+                m1_partial = m1_in_bar.iloc[: m1_j + 1]
+                partial_ohlcv = pd.DataFrame(
+                    [{
+                        "open":   float(m1_partial["open"].iloc[0]),
+                        "high":   float(m1_partial["high"].max()),
+                        "low":    float(m1_partial["low"].min()),
+                        "close":  float(m1_partial["close"].iloc[-1]),
+                        "volume": int(m1_partial["volume"].sum()),
+                    }],
+                    index=pd.DatetimeIndex([ts], tz="UTC"),
+                )
+                m5_with_ind = ind.compute_m5_indicators(
+                    pd.concat([raw_hist, partial_ohlcv])
+                )
+                er = ind.find_m5_entry(m5_with_ind.iloc[-30:], bias, use_session=False)
+                if er is not None and er["bar_time"] == ts_str:
+                    entry_result = er
+                    break
+
         if entry_result is None:
-            continue
-        if entry_result["bar_time"] != str(ts):
+            m5_slice     = merged.iloc[max(0, i - 35): i + 1]
+            entry_result = ind.find_m5_entry(m5_slice, bias, use_session=False)
+        if entry_result is None or entry_result["bar_time"] != ts_str:
             continue
 
         # ── Compute SL/TP via the same build_signal path as the daemon ─────────
