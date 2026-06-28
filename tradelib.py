@@ -112,12 +112,22 @@ def pip_value(pair: str) -> float:
     return 0.01 if "jpy" in pair.lower() else 0.0001
 
 
+def trail_enabled(ind) -> bool:
+    """Return True if three-phase trailing is active for this pair's indicator.
+
+    Reads ind.USE_TRAIL; defaults to True when the attribute is absent so that
+    existing indicator modules without USE_TRAIL retain trailing behaviour.
+    """
+    return bool(getattr(ind, "USE_TRAIL", True))
+
+
 # ── Three-phase trailing stop model ──────────────────────────────────────────
 
 def check_position_events(
     pos: Position,
     bar: pd.Series,
     ind,
+    be_only: Optional[bool] = None,
 ) -> list[tuple[str, float]]:
     """
     Evaluate the latest bar against an open position and return a list of events.
@@ -127,8 +137,13 @@ def check_position_events(
         ind.TRAIL_ACTIVATE_FRAC  float   — optional; defaults to 0.80
         ind.pip_value(pair)      float   — pip size for the pair
 
-    Three-phase model
-    -----------------
+    When be_only=True the model simplifies to two phases only:
+        Phase 1 — Breakeven (same trigger as the full model).
+        Close    — SL stays at entry; trade runs to original TP or SL.
+    Phases 2 and 3 (active trail and TP extension) are suppressed.
+
+    Three-phase model (be_only=False, default)
+    ------------------------------------------
     Phase 1 — Breakeven:
         Once price reaches TRAIL_ACTIVATE_FRAC of the initial TP distance from
         entry, SL moves to entry price (risk to zero).
@@ -152,6 +167,10 @@ def check_position_events(
 
     The caller stops processing further events once a close event is received.
     """
+    # Resolve be_only: explicit arg overrides indicator setting; None → read ind
+    if be_only is None:
+        be_only = not trail_enabled(ind)
+
     events: list[tuple[str, float]] = []
     high = float(bar["high"])
     low  = float(bar["low"])
@@ -192,7 +211,7 @@ def check_position_events(
     )
 
     # ── Phase 3 — intercept first TP hit: extend unconditionally ────────────
-    if hit_tp and not pos.tp_extended:
+    if hit_tp and not pos.tp_extended and not be_only:
         ref_tp  = pos.original_tp if pos.original_tp else pos.take_profit
         tp_dist = abs(ref_tp - pos.entry_price)
         sign    = 1 if pos.direction == "BUY" else -1
@@ -211,7 +230,7 @@ def check_position_events(
         return events
 
     # ── Phase 2 — active trailing (only runs when position is not closing) ────
-    if pos.be_activated:
+    if pos.be_activated and not be_only:
         trail_dist = pos.atr * ind.ATR_TRAIL_MULT * (0.5 if pos.tp_extended else 1.0)
         if pos.direction == "BUY":
             pos.best_price = max(pos.best_price, high)

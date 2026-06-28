@@ -136,6 +136,7 @@ M5_ATR_MIN       = 0.02     # 2 pips (JPY: pip=0.01, so 2 pips = 0.02) — don't
 ATR_PERIOD        = 14
 ATR_TRAIL_MULT       = 0.4   # trailing stop distance: ATR × 0.4 behind best price
 ATR_TP_MULT       = 3.0   # wide ceiling — trailing stop usually exits first
+USE_TRAIL        = False  # True: three-phase trailing; False: breakeven then hold for TP
 
 # Pattern D — HA pullback stop parameters
 HA_SL_BUFFER_PIPS = 2     # pips added beyond the pullback extreme

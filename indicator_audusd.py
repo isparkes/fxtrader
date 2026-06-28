@@ -137,6 +137,7 @@ M5_ATR_MIN       = 0.0002   # 2 pips — don't scalp a dead market
 ATR_PERIOD        = 14
 ATR_TRAIL_MULT       = 0.4   # trailing stop distance: ATR × 0.4 behind best price
 ATR_TP_MULT       = 3.0   # wide ceiling — trailing stop usually exits first
+USE_TRAIL        = False  # True: three-phase trailing; False: breakeven then hold for TP
 
 # Pattern D — HA pullback stop parameters
 HA_SL_BUFFER_PIPS = 2

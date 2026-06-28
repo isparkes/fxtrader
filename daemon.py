@@ -718,7 +718,7 @@ def _process_events(
 
     for event, price in events:
         if event == "be":
-            if live and pos.trade_id:
+            if live and pos.trade_id and tradelib.trail_enabled(ind):
                 trail_dist = round(pos.atr * ind.ATR_TRAIL_MULT, 5)
                 try:
                     oanda.set_trailing_stop(pos.trade_id, trail_dist, pair)

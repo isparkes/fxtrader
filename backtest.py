@@ -205,6 +205,7 @@ def run_backtest(
     df_m1:       Optional[pd.DataFrame] = None,
     df_h1_raw:   Optional[pd.DataFrame] = None,
     df_1d_raw:   Optional[pd.DataFrame] = None,
+    be_only:     Optional[bool] = None,
 ) -> list[dict]:
     """
     Walk-forward simulation using tradelib.check_position_events() for all
@@ -284,7 +285,7 @@ def run_backtest(
 
             def _process_bar(h: float, l: float) -> Optional[tuple[str, float]]:
                 bar_s = pd.Series({"high": h, "low": l})
-                for evt_name, evt_price in tradelib.check_position_events(pos, bar_s, ind):
+                for evt_name, evt_price in tradelib.check_position_events(pos, bar_s, ind, be_only=be_only):
                     if evt_name in ("close_tp", "close_sl"):
                         return (evt_name, evt_price)
                 return None
@@ -384,7 +385,7 @@ def run_backtest(
             # time.  Use bars whose open time is more than 24h before ts.
             d_cutoff  = ts - pd.Timedelta(hours=24)
             d_raw_end = df_1d_raw.index.searchsorted(d_cutoff, side="right")
-            d_slice   = df_1d_raw.iloc[max(0, d_raw_end - D_IND_LOOKBACK):d_raw_end]
+            d_slice   = df_1d_raw.iloc[max(0, d_raw_end - D_IND_LOOKBACK):d_raw_end].copy()
             df_1d_slice = ind.compute_daily_adx(d_slice) if len(d_slice) >= 30 else None
         elif _d_times_legacy is not None:
             d_end       = _d_times_legacy.searchsorted(ts, side="right")
@@ -744,6 +745,56 @@ def report_all(results: list[tuple[str, list[dict]]], bar_mins: int = 5) -> None
     console.print(table)
 
 
+def report_compare(
+    trail_results: list[tuple[str, list[dict]]],
+    be_results:    list[tuple[str, list[dict]]],
+    bar_mins:      int = 5,
+) -> None:
+    """Side-by-side comparison: three-phase trailing vs breakeven-only."""
+    mode_label = "H1 bars (long)" if bar_mins >= 60 else "M5 + M1 sim (scalp)"
+
+    table = Table(
+        title=f"Trail vs BE-only Comparison  ({mode_label})",
+        box=box.ROUNDED,
+    )
+    table.add_column("Pair",        style="bold")
+    table.add_column("Mode",        style="dim")
+    table.add_column("Trades",      justify="right")
+    table.add_column("Win %",       justify="right")
+    table.add_column("Avg W",       justify="right")
+    table.add_column("Avg L",       justify="right")
+    table.add_column("PF",          justify="right")
+    table.add_column("Expect",      justify="right")
+    table.add_column("Total pips",  justify="right")
+    table.add_column("Max DD",      justify="right")
+
+    be_map = {lbl: t for lbl, t in be_results}
+    for pair_label, trail_trades in sorted(trail_results, key=lambda x: x[0]):
+        be_trades = be_map.get(pair_label, [])
+        for label, trades in [("trail", trail_trades), ("BE-only", be_trades)]:
+            if not trades:
+                table.add_row(pair_label if label == "trail" else "", label, "[yellow]no trades[/]", *["—"] * 7)
+                continue
+            s = _compute_stats(trades, bar_mins)
+            pf_str  = f"{s['pf']:.2f}" if s["pf"] != float("inf") else "∞"
+            pip_col = "green" if s["total"] > 0 else "red"
+            table.add_row(
+                pair_label if label == "trail" else "",
+                label,
+                str(s["n"]),
+                f"{s['wr']:.1f}%",
+                f"{s['aw']:.1f}",
+                f"{s['al']:.1f}",
+                pf_str,
+                f"{s['exp']:.1f}",
+                f"[{pip_col}]{s['total']:.1f}[/]",
+                f"[red]{s['max_dd']:.1f}[/]",
+            )
+        table.add_section()
+
+    console.print(table)
+
+
 # ── Period breakdown reporting ────────────────────────────────────────────────
 
 _WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -1046,6 +1097,14 @@ if __name__ == "__main__":
         "--by-pattern", action="store_true",
         help="Print per-entry-pattern (A/C/D/E) breakdown after the main summary",
     )
+    parser.add_argument(
+        "--be-only", action="store_true",
+        help="Use breakeven-only mode: move SL to entry at threshold, then hold for TP (no trailing, no TP extension)",
+    )
+    parser.add_argument(
+        "--compare", action="store_true",
+        help="Run both three-phase trailing and BE-only modes side by side",
+    )
     args = parser.parse_args()
 
     do_update = not args.no_update
@@ -1058,7 +1117,8 @@ if __name__ == "__main__":
     target_pairs = ACTIVE_PAIRS if args.all else [args.pair]
     bar_mins     = 60 if args.long else 5
     mode_desc    = "long mode · H1 bars" if args.long else "scalp mode · M5 + M1 sim"
-    all_results: list[tuple[str, list[dict]]] = []
+    all_results:    list[tuple[str, list[dict]]] = []
+    all_be_results: list[tuple[str, list[dict]]] = []
 
     for pair_key in target_pairs:
         ind        = PAIR_INDICATORS[pair_key]
@@ -1069,40 +1129,68 @@ if __name__ == "__main__":
         if args.no_blocked_days and hasattr(ind, "BLOCKED_DAYS"):
             ind.BLOCKED_DAYS = frozenset()
 
-        console.print(f"[bold cyan]Running {pair_label} ({mode_desc})...[/]")
-
-        if args.long:
-            df_trend, df_entry = fetch_data_long(pair_key, ind, update=do_update)
-            gaps   = _find_data_gaps(df_entry, 60)
-            trades = run_backtest(
-                df_trend, df_entry, bar_mins=60,
-                spread_pips=cfg["spread_long"], use_session=False,
-                pair=pair_key, ind=ind,
-            )
+        if args.compare:
+            run_modes = [False, True]   # explicit override: trail then BE-only
+        elif args.be_only:
+            run_modes = [True]          # explicit override: force BE-only
         else:
-            df_h1, df_4h, df_5m, df_m1, df_h1_raw, df_1d_raw = fetch_data(
-                pair_key, ind, update=do_update
-            )
-            _gap_src = df_m1 if (df_m1 is not None and not df_m1.empty) else df_5m
-            gaps     = _find_data_gaps(_gap_src, 1 if (df_m1 is not None and not df_m1.empty) else 5)
-            trades   = run_backtest(
-                df_h1, df_5m, bar_mins=5,
-                spread_pips=cfg["spread_scalp"], use_session=use_sess,
-                pair=pair_key, ind=ind,
-                df_4h=df_4h, df_m1=df_m1,
-                df_h1_raw=df_h1_raw, df_1d_raw=df_1d_raw,
-            )
+            run_modes = [None]          # read USE_TRAIL from the indicator
 
-        report(trades, bar_mins=bar_mins, pair_label=pair_label,
-               account=args.account, risk_pct=args.risk, gaps=gaps,
-               df_m1=df_m1 if not args.long else None)
-        report_by_week(trades, pair_label=pair_label, bar_mins=bar_mins,
-                       account=args.account, risk_pct=args.risk)
-        if args.by_day:
-            report_by_day(trades, pair_label=pair_label, bar_mins=bar_mins)
-        if args.by_pattern:
-            report_by_pattern(trades, pair_label=pair_label, bar_mins=bar_mins)
-        all_results.append((pair_label, trades))
+        fetched = None   # cache fetched data across both modes for --compare
 
-    if args.all:
+        for be_only in run_modes:
+            effective_be = be_only if be_only is not None else not tradelib.trail_enabled(ind)
+            mode_tag     = "BE-only" if effective_be else "trailing"
+            console.print(f"[bold cyan]Running {pair_label} ({mode_desc}, {mode_tag})...[/]")
+
+            if args.long:
+                if fetched is None:
+                    fetched = fetch_data_long(pair_key, ind, update=do_update)
+                    do_update = False   # skip redundant network fetch on second pass
+                df_trend, df_entry = fetched
+                gaps   = _find_data_gaps(df_entry, 60)
+                trades = run_backtest(
+                    df_trend, df_entry, bar_mins=60,
+                    spread_pips=cfg["spread_long"], use_session=False,
+                    pair=pair_key, ind=ind, be_only=be_only,
+                )
+                df_m1_report = None
+            else:
+                if fetched is None:
+                    fetched = fetch_data(pair_key, ind, update=do_update)
+                    do_update = False
+                df_h1, df_4h, df_5m, df_m1, df_h1_raw, df_1d_raw = fetched
+                _gap_src = df_m1 if (df_m1 is not None and not df_m1.empty) else df_5m
+                gaps     = _find_data_gaps(_gap_src, 1 if (df_m1 is not None and not df_m1.empty) else 5)
+                trades   = run_backtest(
+                    df_h1, df_5m, bar_mins=5,
+                    spread_pips=cfg["spread_scalp"], use_session=use_sess,
+                    pair=pair_key, ind=ind,
+                    df_4h=df_4h, df_m1=df_m1,
+                    df_h1_raw=df_h1_raw, df_1d_raw=df_1d_raw,
+                    be_only=be_only,
+                )
+                df_m1_report = df_m1
+
+            if not args.compare:
+                report(trades, bar_mins=bar_mins, pair_label=pair_label,
+                       account=args.account, risk_pct=args.risk, gaps=gaps,
+                       df_m1=df_m1_report)
+                report_by_week(trades, pair_label=pair_label, bar_mins=bar_mins,
+                               account=args.account, risk_pct=args.risk)
+                if args.by_day:
+                    report_by_day(trades, pair_label=pair_label, bar_mins=bar_mins)
+                if args.by_pattern:
+                    report_by_pattern(trades, pair_label=pair_label, bar_mins=bar_mins)
+
+            if be_only:
+                all_be_results.append((pair_label, trades))
+            else:
+                all_results.append((pair_label, trades))
+
+        fetched = None   # don't carry data between pairs
+
+    if args.compare:
+        report_compare(all_results, all_be_results, bar_mins=bar_mins)
+    elif args.all:
         report_all(all_results, bar_mins=bar_mins)
