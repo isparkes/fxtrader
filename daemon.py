@@ -428,6 +428,8 @@ def _load_state() -> dict:
     discrete:  dict[str, dict]    = {}   # trade_id → position data
     closed:    set[str]           = set()
     month_pips: dict[str, float]  = {}
+    now_utc = datetime.now(timezone.utc)
+    current_ym = (now_utc.year, now_utc.month)
 
     with _TRADE_LOG.open() as fh:
         for lineno, line in enumerate(fh, 1):
@@ -458,7 +460,13 @@ def _load_state() -> dict:
                     closed.add(str(trade_id) if trade_id else "")
                 pnl = rec.get("pnl_pips", 0.0)
                 if pair:
-                    month_pips[pair] = month_pips.get(pair, 0.0) + pnl
+                    ts_str = rec.get("ts", "")
+                    try:
+                        ts_ym = (int(ts_str[0:4]), int(ts_str[5:7]))
+                    except (ValueError, IndexError):
+                        ts_ym = current_ym
+                    if ts_ym == current_ym:
+                        month_pips[pair] = month_pips.get(pair, 0.0) + pnl
             elif event == "deregister" and trade_id:
                 discrete.pop(str(trade_id), None)
             elif event == "be":
